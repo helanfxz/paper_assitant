@@ -1,56 +1,35 @@
 
-from typing import Dict, List, Optional, Any, Tuple, TypedDict, Annotated
-
 from dotenv import load_dotenv
-import gradio as gr
-
-from langchain_qdrant import QdrantVectorStore
-# 加载环境变量 (需要 OPENAI_API_KEY, QDRANT_URL, QDRANT_API_KEY)
+# 加载环境变量 (需要 ZHIPU_API_KEY, QDRANT_URL, QDRANT_API_KEY)
 load_dotenv()
 
 import os
 import time
 import uuid
-import json
 from datetime import datetime
-from typing import Dict, Any, List, Optional, Annotated
-from typing_extensions import TypedDict
+from typing import Dict, Any, List, Optional, Tuple
 
 # 引入 LangChain & LangGraph 核心库
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
-from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from langchain_core.documents import Document
+from langchain_core.tools import tool
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langgraph.graph import StateGraph, START, END
+from langgraph.graph import StateGraph, MessagesState, START, END  # [优化 #1] 手动构建 ReAct 图
+from langgraph.prebuilt import ToolNode
 from langgraph.checkpoint.memory import MemorySaver
 
 # 引入 Qdrant
 from qdrant_client import QdrantClient
 from qdrant_client.models import VectorParams, Distance
-# 换成这行
 from langchain_qdrant import QdrantVectorStore
 
-# [优化 1] 引入专为大模型优化的 PDF 解析库
+# 引入专为大模型优化的 PDF 解析库
 import pymupdf4llm
 
 
 # ==========================================
-# 1. 核心架构：LangGraph 状态定义
-# ==========================================
-class AgentState(TypedDict):
-    messages: Annotated[List[BaseMessage], "add_messages"]
-    user_id: str
-    query: str
-    action_type: str  # 路由类型：pdf / memory / general
-    extended_queries: List[str]  # [优化] 存储扩展后的多查询
-    retrieved_docs: str
-    retrieved_memory: str
-    final_answer: str
-    hallucination_risk: bool  # [优化] 标记是否存在幻觉风险
-
-
-# ==========================================
-# 2. 核心架构：工业级智能体实现
+# 核心架构：ReAct Agent 实现
 # ==========================================
 class IndustrialPDFLearningAgent:
     """基于 LangGraph + Qdrant 的企业级多重优化文档问答助手"""
@@ -102,9 +81,10 @@ class IndustrialPDFLearningAgent:
             "notes_added": 0
         }
         self.current_document = None
+        self._last_retrieved_docs = ""  # [优化 #1] 供幻觉检测使用
 
         self.checkpointer = MemorySaver()
-        self.app = self._build_graph()
+        self.app = self._build_agent()  # [优化 #1] ReAct Agent
 
     def _init_qdrant_collections(self):
         collections = [col.name for col in self.qdrant_client.get_collections().collections]
@@ -116,157 +96,118 @@ class IndustrialPDFLearningAgent:
                 )
 
     # ---------------------------------------------------------
-    # [优化] LangGraph 节点 1：LLM 智能查询路由
+    # [优化 #1] 工具定义：将核心操作封装为 LangChain Tool
     # ---------------------------------------------------------
-    def _route_query(self, state: AgentState) -> str:
-        query = state["query"]
-        prompt = f"""分析用户的意图，并将其分类为以下三种之一，只输出英文代号：
-        1. 'memory'：用户在询问自己以前的笔记、之前的对话、或者过去的记忆。
-        2. 'general'：用户在进行日常打招呼或询问与专业知识无关的基础常识。
-        3. 'pdf'：用户在询问学术问题、知识点、需要查阅当前学习资料。
-        用户输入：{query}
-        代号："""
+    def _build_tools(self):
+        agent_self = self  # 闭包捕获 self
 
-        route_decision = self.fast_llm.invoke(prompt).content.strip().lower()
-        if "memory" in route_decision:
-            return "recall_memory_node"
-        elif "general" in route_decision:
-            return "general_chat_node"
-        else:
-            return "retrieve_pdf_node"
+        @tool
+        def search_pdf(query: str) -> str:
+            """在已加载的 PDF 文档中检索与问题相关的内容。当用户询问学术知识、文档内容时使用。"""
+            print(f"[TOOL] search_pdf: {query}")
+            # 多查询扩展 (MQE)
+            mqe_prompt = f"为了在学术文档中全面检索以下问题，请生成3个不同表达或侧重点的相似搜索词。不要加序号，每行一个。\n原始问题：{query}"
+            extended = agent_self.fast_llm.invoke(mqe_prompt).content.split("\n")
+            search_queries = [query] + [q.strip() for q in extended if q.strip()]
 
-    # ---------------------------------------------------------
-    # [优化] LangGraph 节点 2：多查询扩展 + 父子块检索 + 重排
-    # ---------------------------------------------------------
-    def _retrieve_pdf_node(self, state: AgentState) -> AgentState:
-        print("[INFO]:_retrieve_pdf_node")
-        query = state["query"]
+            # 分发检索 + Small-to-Big 父子块映射
+            all_child_docs = []
+            for q in search_queries:
+                all_child_docs.extend(agent_self.pdf_store.similarity_search(q, k=3))
 
-        # 1. 多查询扩展 (MQE)
-        mqe_prompt = f"为了在学术文档中全面检索以下问题，请生成3个不同表达或侧重点的相似搜索词。不要加序号，每行一个。\n原始问题：{query}"
-        extended = self.fast_llm.invoke(mqe_prompt).content.split("\n")
-        print(f"MQE:{extended}")
-        search_queries = [query] + [q.strip() for q in extended if q.strip()]
+            parent_map = {}
+            for doc in all_child_docs:
+                pid = doc.metadata.get("parent_id")
+                if pid and pid not in parent_map:
+                    parent_map[pid] = doc.metadata.get("parent_text", doc.page_content)
 
-        # 2. 分发检索 (搜小块)
-        all_child_docs = []
-        for q in search_queries:
-            # k=3，搜 4 个词就是 12 个小块
-            docs = self.pdf_store.similarity_search(q, k=3)
-            all_child_docs.extend(docs)
+            unique_parents = list(parent_map.values())
+            if not unique_parents:
+                agent_self._last_retrieved_docs = ""
+                return "未能检索到相关文档内容。"
 
-        # 3. 映射到父块并去重 (Small-to-Big)
-        parent_map = {}
-        for doc in all_child_docs:
-            parent_id = doc.metadata.get("parent_id")
-            parent_text = doc.metadata.get("parent_text", doc.page_content)
-            if parent_id and parent_id not in parent_map:
-                parent_map[parent_id] = parent_text
-
-        unique_parents = list(parent_map.values())
-        print("ReRanking...")
-        # 4. LLM 轻量级重排 (Reranking)
-        # 如果你有 DashScope 等专业 Reranker，可在此处替换 API
-        reranked_context = ""
-        if unique_parents:
+            # LLM 轻量级重排
             rerank_prompt = f"以下是从文档中粗筛出的几个片段。请挑选出与问题【{query}】最相关的片段并拼接，剔除无关片段。\n\n片段：\n{unique_parents[:8]}"
-            reranked_context = self.fast_llm.invoke(rerank_prompt).content
-        else:
-            reranked_context = "未能检索到相关文档内容。"
+            result = agent_self.fast_llm.invoke(rerank_prompt).content
+            agent_self._last_retrieved_docs = result  # 供幻觉检测使用
+            return result
 
-        return {"retrieved_docs": reranked_context, "action_type": "pdf"}
+        @tool
+        def recall_memory(query: str) -> str:
+            """从用户的历史笔记和对话记录中检索相关记忆。当用户询问之前的笔记、历史对话时使用。"""
+            print(f"[TOOL] recall_memory: {query}")
+            filter_kwargs = {"filter": {"must": [{"key": "user_id", "match": {"value": agent_self.user_id}}]}}
+            try:
+                docs = agent_self.memory_store.similarity_search(query, k=4, **filter_kwargs)
+            except Exception:
+                docs = agent_self.memory_store.similarity_search(query, k=4)
+            return "\n\n".join([f"[{d.metadata.get('type', 'note')}]: {d.page_content}" for d in docs])
 
-    def _recall_memory_node(self, state: AgentState) -> AgentState:
-        print("[INFO]:_recall_memory_node")
-        filter_kwargs = {"filter": {"must": [{"key": "user_id", "match": {"value": state["user_id"]}}]}}
-        try:
-            docs = self.memory_store.similarity_search(state["query"], k=4, **filter_kwargs)
-        except:
-            docs = self.memory_store.similarity_search(state["query"], k=4)
-        memory_context = "\n\n".join([f"[{d.metadata.get('type', 'note')}]: {d.page_content}" for d in docs])
-        return {"retrieved_memory": memory_context, "action_type": "memory"}
+        @tool
+        def add_note(content: str) -> str:
+            """将用户提供的内容保存为学习笔记到记忆库。"""
+            print(f"[TOOL] add_note: {content[:50]}")
+            doc = Document(
+                page_content=content,
+                metadata={"user_id": agent_self.user_id, "type": "note", "concept": "general"}
+            )
+            agent_self.memory_store.add_documents([doc])
+            agent_self.stats["notes_added"] += 1
+            return f"笔记已保存：{content[:50]}..."
 
-    def _general_chat_node(self, state: AgentState) -> AgentState:
-        print("[INFO]:_general_chat_node")
-        return {"action_type": "general"}
+        @tool
+        def get_stats() -> str:
+            """获取当前会话的学习统计信息，包括加载文档数、提问次数、笔记数量等。"""
+            s = agent_self.stats
+            duration = (datetime.now() - s["session_start"]).seconds
+            return (f"会话时长: {duration}秒 | 加载文档: {s['docs_loaded']} | "
+                    f"提问次数: {s['questions_asked']} | 笔记数量: {s['notes_added']}")
 
-    # ---------------------------------------------------------
-    # LangGraph 节点 3：生成回答
-    # ---------------------------------------------------------
-    def _generate_answer_node(self, state: AgentState) -> AgentState:
-        query = state["query"]
-        action = state.get("action_type")
-
-        if action == "memory":
-            prompt = f"你是学习助手。请基于用户的历史记忆回答：\n{state.get('retrieved_memory')}\n\n问题：{query}"
-        elif action == "general":
-            prompt = f"你是友好的学术助手。请自然地回答用户：{query}"
-        else:
-            prompt = f"你是专业学术助手。请基于以下论文片段回答，务必忠于原文，不知则说不知：\n{state.get('retrieved_docs')}\n\n问题：{query}"
-
-        response = self.llm.invoke([HumanMessage(content=prompt)]).content
-        return {"final_answer": response}
-
-    # ---------------------------------------------------------
-    # [优化] LangGraph 节点 4：幻觉检测与反思
-    # ---------------------------------------------------------
-    def _verify_hallucination_node(self, state: AgentState) -> AgentState:
-        if state.get("action_type") != "pdf":
-            # 非查阅 PDF 的任务不强制检测幻觉
-            return {"messages": [AIMessage(content=state["final_answer"])]}
-
-        ans = state["final_answer"]
-        ctx = state["retrieved_docs"]
-
-        verify_prompt = f"""请作为客观的裁判，检查【回答】是否超出了【参考上下文】的范围。
-        上下文：{ctx}
-        回答：{ans}
-        如果回答中包含上下文中根本没有提到的实体、数据或硬事实，请回复'FAIL'。如果完全基于上下文，回复'PASS'。"""
-
-        check_result = self.fast_llm.invoke(verify_prompt).content
-
-        # 如果检测到幻觉，在回答末尾追加警告
-        if "FAIL" in check_result.upper():
-            ans += "\n\n⚠️ **[系统校验提示]**：本回答部分内容可能未在当前文档的检索范围内明确提及，存在外部大模型知识（幻觉）的介入，请谨慎参考。"
-
-        # 记录 QA 历史到记忆库
-        qa_memory = Document(
-            page_content=f"问题: {state['query']}\n回答: {ans}",
-            metadata={"user_id": self.user_id, "type": "qa_history"}
-        )
-        self.memory_store.add_documents([qa_memory])
-
-        return {"final_answer": ans, "messages": [AIMessage(content=ans)]}
+        return [search_pdf, recall_memory, add_note, get_stats]
 
     # ---------------------------------------------------------
-    # 构建图结构
+    # [优化 #1] 手动构建 ReAct 图（Reasoning + Acting 循环）
     # ---------------------------------------------------------
-    def _build_graph(self):
-        workflow = StateGraph(AgentState)
+    def _build_agent(self):
+        tools = self._build_tools()
+        llm_with_tools = self.llm.bind_tools(tools)
+        tool_node = ToolNode(tools)
 
-        # 添加所有节点
-        workflow.add_node("retrieve_pdf_node", self._retrieve_pdf_node)
-        workflow.add_node("recall_memory_node", self._recall_memory_node)
-        workflow.add_node("general_chat_node", self._general_chat_node)
-        workflow.add_node("generate_answer_node", self._generate_answer_node)
-        workflow.add_node("verify_hallucination_node", self._verify_hallucination_node)
+        system_msg = SystemMessage(content=(
+            "你是一个专业的学术文档学习助手。你拥有以下工具：\n"
+            "- search_pdf：在已加载的 PDF 文档中检索内容\n"
+            "- recall_memory：从用户历史笔记和对话中检索记忆\n"
+            "- add_note：保存学习笔记\n"
+            "- get_stats：查看学习统计\n\n"
+            "请根据用户意图自主决定调用哪个工具，或直接回答无需工具的问题。"
+            "回答学术问题时务必忠于文档原文，不知则说不知。"
+        ))
 
-        # 边和路由
-        workflow.add_conditional_edges(START, self._route_query)
+        # agent 节点：LLM 推理，决定调用工具还是直接回答
+        def agent_node(state: MessagesState):
+            messages = [system_msg] + state["messages"]
+            response = llm_with_tools.invoke(messages)
+            return {"messages": [response]}
 
-        # 检索完后去生成
-        workflow.add_edge("retrieve_pdf_node", "generate_answer_node")
-        workflow.add_edge("recall_memory_node", "generate_answer_node")
-        workflow.add_edge("general_chat_node", "generate_answer_node")
+        # 条件路由：有 tool_calls → 执行工具；否则 → 结束
+        def should_continue(state: MessagesState):
+            last = state["messages"][-1]
+            if hasattr(last, "tool_calls") and last.tool_calls:
+                return "tools"
+            return END
 
-        # 生成完后做幻觉检测，然后结束
-        workflow.add_edge("generate_answer_node", "verify_hallucination_node")
-        workflow.add_edge("verify_hallucination_node", END)
+        workflow = StateGraph(MessagesState)
+        workflow.add_node("agent", agent_node)
+        workflow.add_node("tools", tool_node)
+
+        workflow.add_edge(START, "agent")
+        workflow.add_conditional_edges("agent", should_continue)
+        workflow.add_edge("tools", "agent")  # 工具执行完回到 agent，形成 ReAct 循环
 
         return workflow.compile(checkpointer=self.checkpointer)
 
     # ==========================================
-    # [优化] 文档入库 (PyMuPDF4LLM + 父子块)
+    # 文档入库 (PyMuPDF4LLM + 父子块)
     # ==========================================
     def load_document(self, pdf_path: str) -> Dict[str, Any]:
         if not os.path.exists(pdf_path):
@@ -319,9 +260,51 @@ class IndustrialPDFLearningAgent:
     def ask(self, question: str) -> str:
         self.stats["questions_asked"] += 1
         config = {"configurable": {"thread_id": self.session_id}}
-        inputs = {"query": question, "user_id": self.user_id, "messages": [HumanMessage(content=question)]}
-        result = self.app.invoke(inputs, config=config)
-        return result["final_answer"]
+        original_question = question
+
+        # [优化 #1] ReAct Agent 自主决定调用哪个工具
+        # [优化 #2] 幻觉检测反思循环，最多重试 3 次
+        for retry in range(4):
+            self._last_retrieved_docs = ""
+            result = self.app.invoke(
+                {"messages": [HumanMessage(content=question)]},
+                config=config,
+            )
+            answer = result["messages"][-1].content
+
+            # 只有调用了 search_pdf 工具才做幻觉检测
+            if not self._last_retrieved_docs:
+                return answer
+
+            verify_prompt = (
+                f"请作为客观的裁判，检查【回答】是否超出了【参考上下文】的范围。\n"
+                f"上下文：{self._last_retrieved_docs}\n"
+                f"回答：{answer}\n"
+                f"如果回答中包含上下文中根本没有提到的实体、数据或硬事实，请回复'FAIL'。如果完全基于上下文，回复'PASS'。"
+            )
+            check = self.fast_llm.invoke(verify_prompt).content
+            hallucination = "FAIL" in check.upper()
+            print(f"[INFO] 幻觉检测：{'FAIL' if hallucination else 'PASS'} (retry={retry})")
+
+            if not hallucination or retry >= 3:
+                if hallucination:
+                    answer += "\n\n⚠️ **[系统校验提示]**：本回答部分内容可能未在当前文档的检索范围内明确提及，存在外部大模型知识（幻觉）的介入，请谨慎参考。"
+                # 记录 QA 历史到记忆库
+                self.memory_store.add_documents([Document(
+                    page_content=f"问题: {original_question}\n回答: {answer}",
+                    metadata={"user_id": self.user_id, "type": "qa_history"}
+                )])
+                return answer
+
+            # 重写问题，下一轮重新检索
+            rewrite_prompt = (
+                f"原问题检索效果不佳，请重写以下问题使其更适合在学术文档中检索，"
+                f"要求更具体、使用专业术语：\n{original_question}"
+            )
+            question = self.fast_llm.invoke(rewrite_prompt).content.strip()
+            print(f"[INFO] 重写后问题 (retry={retry+1})：{question}")
+
+        return answer
 
     def add_note(self, content: str, concept: Optional[str] = None):
         doc = Document(
@@ -332,10 +315,9 @@ class IndustrialPDFLearningAgent:
 
 
 # ==========================================
-# 3. 前端交互：Gradio UI 层 (几乎保留原样)
+# 前端交互：Gradio UI 层
 # ==========================================
 import gradio as gr
-from typing import List, Tuple
 
 
 def create_gradio_ui():
