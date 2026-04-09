@@ -1,0 +1,326 @@
+[
+  {
+    "question": "S-LoRA 提出了哪种显存管理机制来解决多 LoRA 适配器并发服务时的内存碎片问题？",
+    "ground_truth": "S-LoRA 提出了统一分页（Unified Paging）机制，通过内存池化来协同管理 KV Cache 和适配器权重。"
+  },
+  {
+    "question": "在 MoLA (Higher Layers Need More LoRA Experts) 这篇论文中，Transformer 的高层和低层在分配专家（Experts）数量时有什么核心区别？",
+    "ground_truth": "高层（Higher Layers）被分配了更多的 LoRA 专家，而低层分配较少或不分配专家。因为高层需要处理更复杂的语义特征，而低层主要处理基础的浅层特征。"
+  },
+  {
+    "question": "Mixture-of-Agents (MoA) 架构中，多个大语言模型（LLMs）是如何实现协作的？",
+    "ground_truth": "MoA 将多个 LLMs 组织成多层（Layered）架构，每一层的模型会将前一层所有模型的输出汇聚起来，作为附加的提示（Prompt）来生成质量更高、更综合的响应。"
+  },
+  {
+    "question": "UniMoE 的核心架构旨在解决大模型领域的哪两个关键扩展问题？",
+    "ground_truth": "旨在同时解决多模态（Multimodal）信息的统一处理，以及利用混合专家模型（MoE）机制实现参数规模的有效扩展。"
+  },
+  {
+    "question": "S-LoRA 相比于传统的独立部署多个微调模型，在系统工程实现上有哪些具体的吞吐量优势？",
+    "ground_truth": "S-LoRA 通过解耦基础模型和适配器的计算，利用统一分页技术管理显存，并结合定制的张量并行（Tensor Parallelism）CUDA 算子进行批量计算。这使得单 GPU 或集群能够同时高效服务数千个不同的 LoRA 任务，大幅提升了系统的批处理吞吐量。"
+  },
+  {
+    "question": "结合 MoA (Mixture-of-Agents) 的原理，说明为什么这种多智能体路由架构能在各类评测榜单上超越单个规模更大的基础模型？",
+    "ground_truth": "MoA 利用了模型间的协同效应（Collaborative Capabilities）。不同模型在知识覆盖和推理能力上具有互补性，通过分层的信息流动和生成结果的交叉验证，MoA 能够提取多个模型的强项，从而在综合能力上超越单一的庞大模型。"
+  },
+  {
+    "question": "总结 MoRAL (MoE Augmented LoRA) 或类似架构，探讨将混合专家（MoE）与低秩自适应（LoRA）结合的主要工程价值是什么？",
+    "ground_truth": "主要价值在于极高的参数效率和多任务适应性。系统可以在保持基础大模型权重冻结的前提下，通过路由机制将不同领域的任务动态分配给特定的 LoRA 专家模块，从而在极低的计算和显存开销下实现复杂多任务的微调。"
+  },
+  {
+    "question": "根据知识库中的论文，S-LoRA 的第一作者在 2025 年加入 OpenAI 后，对统一分页机制做了哪些核心重构？",
+    "ground_truth": "文档上下文中未提及 S-LoRA 作者在 2025 年的个人履历及后续重构信息。"
+  },
+  {
+    "question": "UniMoE 论文中明确提到的模型在 CIFAR-100 数据集上的 Top-1 准确率具体是多少？",
+    "ground_truth": "文档上下文中未提供关于 CIFAR-100 数据集的具体准确率数值。"
+  },
+  {
+    "question": "Alpha-LoRA 在结合量子计算加速模块后，其训练速度提升了多少倍？",
+    "ground_truth": "文档上下文中未提及 Alpha-LoRA 结合了量子计算加速模块。"
+  },
+  {
+    "question": "在 S-LoRA 的系统设计中，为了提高不同请求调用不同适配器时的批处理效率，采用了什么算子技术？",
+    "ground_truth": "采用了定制的张量并行（Tensor Parallelism）CUDA 算子，使得不同请求能够在一个批次中无缝调度各自的适配器权重。"
+  },
+  {
+    "question": "MoA (Mixture-of-Agents) 架构的每一层是如何处理信息的？",
+    "ground_truth": "MoA 每一层的模型会将前一层所有模型的输出汇聚起来，作为附加的提示（Prompt）进行处理，从而生成质量更高、更综合的响应。"
+  },
+  {
+    "question": "在 MoA 架构中，最后一层（最后一环）的模型配置通常有什么特点？",
+    "ground_truth": "最后一层通常只包含一个被选定的主模型，它负责整合前面各层生成的候选响应，并输出最终的单一高质量结果。"
+  },
+  {
+    "question": "MoLA (Higher Layers Need More LoRA Experts) 的核心发现是什么？",
+    "ground_truth": "研究发现 Transformer 的高层对参数微调更敏感。因此 MoLA 提出在架构高层分配更多的 LoRA 专家，而在底层分配较少或不分配专家。"
+  },
+  {
+    "question": "MoLA 中的路由机制（Router）如何决定将当前 Token 交给哪个 LoRA 专家处理？",
+    "ground_truth": "通过一个轻量级的门控网络（Gating Network），计算 Token 的隐藏状态（Hidden State）与各个专家特征的相似度概率来决定分配权重。"
+  },
+  {
+    "question": "相比于传统的稠密多模态模型，UniMoE 采用稀疏激活（Sparse Activation）机制的最大优势是什么？",
+    "ground_truth": "在显著增加模型总参数量、提升多模态理解能力的同时，每次前向传播只激活少数相关专家，从而维持了与较小模型相当的推理延迟和计算成本。"
+  },
+  {
+    "question": "UniMoE 是如何解决不同模态（如文本、图像、音频）数据输入不一致问题的？",
+    "ground_truth": "UniMoE 引入了模态特定的编码器（Modality-specific Encoders），将不同模态的特征映射到统一的语义空间中，再交由混合专家网络进行统一处理。"
+  },
+  {
+    "question": "在 MoRAL (MoE Augmented LoRA) 架构下进行微调时，基础大模型的权重状态是怎样的？",
+    "ground_truth": "基础大模型的权重是完全冻结（Frozen）的，只有外挂的 MoE-LoRA 模块和门控网络参与梯度更新。"
+  },
+  {
+    "question": "结合文档，S-LoRA 和 MoLA 虽然都涉及 LoRA 技术的优化，但两篇论文的研究侧重点有什么根本不同？",
+    "ground_truth": "S-LoRA 侧重于系统工程和推理服务（Serving），旨在解决大量 LoRA 模型的并发部署和显存瓶颈；而 MoLA 侧重于模型架构和训练微调（Training），研究如何在 Transformer 的不同层间最优地分配微调参数。"
+  },
+  {
+    "question": "Alpha-LoRA 提出了一种突破传统 LoRA 限制的机制，主要针对的是哪个超参数的动态调整？",
+    "ground_truth": "主要针对秩（Rank）的动态调整，打破了传统 LoRA 中所有网络层使用固定单一秩（Rank）的限制。"
+  },
+  {
+    "question": "根据知识库中的论文，MoLA 架构在训练时推荐使用哪种具体的 NVIDIA GPU 型号（如 H100 或 A100）才能达到最佳吞吐量？",
+    "ground_truth": "文档上下文中未提及达到最佳吞吐量所推荐的具体 GPU 型号。"
+  },
+  {
+    "question": "UniMoE 论文中提供的实验数据表明，该模型在特定的罕见病医学影像（Medical Image）识别任务上准确率是多少？",
+    "ground_truth": "文档上下文中未提供关于特定罕见病医学影像识别任务的准确率对比数据。"
+  },
+  {
+    "question": "S-LoRA 的统一分页技术是否能够完全消除分布式集群节点之间的网络通信延迟？",
+    "ground_truth": "文档未提及统一分页技术能消除网络通信延迟，统一分页机制主要用于解决单机/单卡内的显存碎片和显存管理问题。"
+  },
+  {
+    "question": "MoA (Mixture-of-Agents) 明确指出其在哪些特定编程语言的代码生成任务上表现不佳？",
+    "ground_truth": "文档上下文中未提及 MoA 在特定编程语言代码生成任务上表现不佳的具体信息。"
+  },
+  {
+    "question": "S-LoRA 的统一分页（Unified Paging）机制在内存池中只管理 KV Cache 吗？",
+    "ground_truth": "不是，它同时将 KV Cache 和大量不同 LoRA 适配器的权重（Adapter Weights）纳入同一个内存池中进行动态协同管理。"
+  },
+  {
+    "question": "在 Mixture-of-Agents (MoA) 架构中，作为提议者（Proposer）的模型和作为聚合者（Aggregator）的模型，在选择策略上通常有何区别？",
+    "ground_truth": "提议者通常选择具备多样化特长的小中型模型，以提供丰富的候选视角；而聚合者（尤其是最后一层）通常选择综合推理能力和指令遵循能力最强的顶级大模型，以进行最佳的甄别和整合。"
+  },
+  {
+    "question": "MoA 架构由于引入了多层、多模型的流转，主要面临哪两个显著的工程代价（Trade-off）？",
+    "ground_truth": "显著增加了首字响应延迟（Time To First Token / Latency），并且在模型间传递上下文时会消耗大量的输入 Tokens，带来极高的推理成本。"
+  },
+  {
+    "question": "UniMoE 的多模态训练流程通常分为几个主要阶段？",
+    "ground_truth": "通常分为三个阶段：模态特定的预训练（用于对齐特征空间）、引入 MoE 的多模态预训练（学习跨模态基础表示）、以及最后的多模态指令微调（提升复杂任务的遵循能力）。"
+  },
+  {
+    "question": "为什么在 UniMoE 中，直接对所有模态使用统一的密集（Dense）多层感知机容易导致性能瓶颈？",
+    "ground_truth": "因为不同模态（如视觉、音频、文本）的特征分布和语义密度差异巨大，统一的密集网络容易产生模态间的相互干扰（负迁移/Negative Transfer），而 MoE 机制可以通过让不同的专家分工处理特定模态特征来缓解这一问题。"
+  },
+  {
+    "question": "MoLA 在对比不同 Transformer 层的 LoRA 专家分配策略时，除了其主张的“高层多专家（Top-heavy）”，还设立了哪些基线（Baseline）策略进行对照实验？",
+    "ground_truth": "还对照了“所有层均匀分配（Even）”和“低层多专家（Bottom-heavy）”等策略，最终实验证明高层多专家策略在微调任务上效果最佳。"
+  },
+  {
+    "question": "MoLA 论文中认为，Transformer 的低层（Bottom Layers）不适合分配过多微调专家的核心原因是什么？",
+    "ground_truth": "因为研究表明低层主要负责捕捉通用、基础的浅层特征（如基础语法和词法），这些特征在不同任务间具有普适性，对特定下游任务的微调敏感度较低。"
+  },
+  {
+    "question": "在 MoRAL (MoE Augmented LoRA) 的推理过程中，门控网络（Gating Network）会激活所有的特定领域 LoRA 专家吗？",
+    "ground_truth": "不会。为了保持计算效率并控制推理成本，MoRAL 采用稀疏激活机制（如 Top-K 路由），每次前向传播只激活少数几个与当前 Token 最相关的 LoRA 专家。"
+  },
+  {
+    "question": "如果使用 MoRAL 架构去适配一个全新的医疗垂直领域任务，通常需要重新训练或解冻基础大模型的权重吗？",
+    "ground_truth": "不需要。基础模型的权重保持冻结（Frozen）状态，只需在现有的 MoRAL 架构上添加并训练新的医疗领域专用 LoRA 专家模块及对应的门控网络即可。"
+  },
+  {
+    "question": "Alpha-LoRA 在决定各个网络层的秩（Rank）时，是依靠工程师人工经验手动设定的吗？",
+    "ground_truth": "不是。Alpha-LoRA 采用了一种自适应（动态）分配策略，能够根据每个网络层在特定任务上的敏感度或重要性，自动为不同层分配最合适的秩大小。"
+  },
+  {
+    "question": "相比于在所有层统一使用固定较大 Rank 的传统 LoRA，Alpha-LoRA 这种动态分配策略能带来什么直观的优化指标？",
+    "ground_truth": "能在保持甚至提升模型微调准确率的同时，大幅减少总体的可训练参数量，从而降低显存占用和训练开销。"
+  },
+  {
+    "question": "综合知识库中的论文，如果要构建一个支持上千个用户的不同多模态微调任务的高并发在线服务，应当如何融合这些论文中的架构设计？",
+    "ground_truth": "可以使用 UniMoE 或 MoRAL 作为多任务/多模态模型的基础架构实现能力解耦，并在底层系统部署时引入 S-LoRA 的统一分页和定制算子技术，以解决海量微调模型并发带来的显存碎片和吞吐量瓶颈问题。"
+  },
+  {
+    "question": "根据知识库中的论文，UniMoE 是否支持直接连接医院的 CT 扫描仪器，自动输出带格式的 PDF 电子病历？",
+    "ground_truth": "文档上下文中未提及 UniMoE 支持直接连接医疗仪器及自动生成 PDF 电子病历的具体工程应用。"
+  },
+  {
+    "question": "MoA (Mixture-of-Agents) 论文中是否指出，将该架构部署在自动驾驶汽车的车端推理芯片上时，帧率（FPS）表现如何？",
+    "ground_truth": "文档上下文中未提及将 MoA 架构部署在自动驾驶车端及相关的帧率（FPS）表现数据。"
+  },
+  {
+    "question": "Alpha-LoRA 论文中提到的动态秩分配算法，是否使用了量子退火计算（Quantum Annealing）技术来寻找最优解？",
+    "ground_truth": "文档上下文中未包含关于 Alpha-LoRA 使用量子计算相关技术的任何信息。"
+  },
+  {
+    "question": "在 S-LoRA 的系统评测对比中，其批处理吞吐量是否超过了专门针对芯片级优化的 TensorRT-LLM 框架？",
+    "ground_truth": "文档上下文中未提及 S-LoRA 与 TensorRT-LLM 框架的直接批处理吞吐量对比数据。"
+  },
+  {
+    "question": "根据知识库内容，MoLA 架构的提出者是否在 2024 年将其核心算法捐赠给了 Apache 开源基金会？",
+    "ground_truth": "文档上下文中未提及关于 MoLA 算法被捐赠给开源基金会的相关信息。"
+  },
+  {
+    "question": "LoraHub 的无需训练（Training-free）组合具体是如何实现的？",
+    "ground_truth": "LoraHub 通过无梯度优化算法（如 CMA-ES）来寻找最优的标量权重，将多个预训练的 LoRA 模块线性组合起来，无需计算梯度或进行反向传播。"
+  },
+  {
+    "question": "LoraHub 在面对未见过的下游任务时，其核心工作流包含哪几个步骤？",
+    "ground_truth": "核心步骤包括：获取新任务的少量样本（Few-shot），使用无梯度优化器基于这些样本评估组合 Loss 以确定各 LoRA 模块的最佳标量权重，最后合并权重进行推理。"
+  },
+  {
+    "question": "为什么 LoraHub 能够实现高效的跨任务（Cross-Task）泛化？",
+    "ground_truth": "因为不同的 LoRA 模块在预训练时学习到了不同的底层可重用技能。通过针对新任务的动态权重组合，可以快速调整这些技能的比例以适应新的数据分布。"
+  },
+  {
+    "question": "在计算最佳组合权重时，LoraHub 的运行会改变底层基础模型的参数吗？",
+    "ground_truth": "不会。不仅基础模型的参数完全冻结，连参与组合的各个 LoRA 模块的内部权重也是冻结的。系统仅优化外层的组合系数。"
+  },
+  {
+    "question": "如果只提供 Zero-shot（零样本）而没有任何样本数据，LoraHub 能否执行其典型的权重优化流程？",
+    "ground_truth": "不能。LoraHub 严重依赖少量（Few-shot）的样本来计算候选权重组合的 Loss 指标，以此指导无梯度的启发式搜索。"
+  },
+  {
+    "question": "LoraHub 论文中，作为优化目标的评估指标通常是什么？",
+    "ground_truth": "通常是在给定的 Few-shot 验证数据集上计算得出的交叉熵损失（Cross-Entropy Loss）。"
+  },
+  {
+    "question": "根据 LoraHub 文档，作者是否宣称使用 10 万个以上的 LoRA 模块组合能直接超越 GPT-4 的推理能力？",
+    "ground_truth": "文档上下文中未提及使用超过 10 万个 LoRA 模块组合的实验数据，也没有关于直接超越 GPT-4 推理能力的断言。"
+  },
+  {
+    "question": "AdapterFusion 提出了怎样的一个“两阶段”学习框架？",
+    "ground_truth": "阶段一：在各个独立任务上分别训练特定的 Adapter 并冻结基础模型；阶段二：冻结基础模型和所有任务的 Adapter，引入并训练一个新的 Fusion 模块来学习如何动态组合这些 Adapter。"
+  },
+  {
+    "question": "为什么 AdapterFusion 将其任务组合方式称为“非破坏性（Non-Destructive）”的？",
+    "ground_truth": "因为在第一阶段训练好的特定任务 Adapter 在第二阶段是完全冻结的。这保证了模型在学习如何组合新技能时，不会破坏或忘记之前学习到的独立任务技能（即防止灾难性遗忘）。"
+  },
+  {
+    "question": "AdapterFusion 的融合层（Fusion Layer）是如何决定各个 Adapter 的贡献度的？",
+    "ground_truth": "使用了类似于注意力（Attention）的机制。根据当前输入的隐藏特征，通过 Softmax 激活函数计算分布概率，从而动态决定输入应该分配给每个 Adapter 的权重。"
+  },
+  {
+    "question": "相比于传统的多任务顺序微调（Sequential Fine-tuning），AdapterFusion 旨在解决的核心痛点是什么？",
+    "ground_truth": "旨在解决微调过程中常见的灾难性遗忘（Catastrophic Forgetting）问题，以及避免在任务切换时性能下降的知识干扰。"
+  },
+  {
+    "question": "如果在 AdapterFusion 的推理阶段移除最终的 Fusion 模块，模型还能正常工作吗？",
+    "ground_truth": "可以。模型会回退到基础预训练模型的状态（或仅使用单一 Adapter 的状态），因为基础模型的底层权重在整个过程中从未被修改过。"
+  },
+  {
+    "question": "AdapterFusion 的两阶段范式中，第一阶段训练时，是否会更新基础 Transformer 架构中的前馈网络（FFN）参数？",
+    "ground_truth": "不会。第一阶段同样冻结基础模型的所有参数，只更新插入在 Transformer 层中的特定任务 Adapter 的参数。"
+  },
+  {
+    "question": "根据 AdapterFusion 的论文，这种架构在处理医疗影像 X 光片时，Fusion 模块的计算延迟增加了多少毫秒？",
+    "ground_truth": "文档上下文中未提及处理医疗影像 X 光片的具体延迟数据，该方法主要针对自然语言处理（NLP）领域。"
+  },
+  {
+    "question": "SMEAR (Soft Merging of Experts with Adaptive Routing) 在多任务学习中是如何合并模块化技能的？",
+    "ground_truth": "SMEAR 通过在每一层计算路由概率，直接在参数空间上对不同专家的参数权重进行加权合并（软合并），从而在每次前向传播时生成一组单一的合并权重。"
+  },
+  {
+    "question": "SMEAR 方法与传统稀疏 MoE（如 Top-K 路由）在计算前向传播时最核心的差异是什么？",
+    "ground_truth": "传统稀疏 MoE 是分别计算被选中专家的输出激活值，然后再将激活值加权求和；而 SMEAR 是先对专家的权重矩阵本身进行加权合并，然后用这唯一的一个合并矩阵执行一次前向计算。"
+  },
+  {
+    "question": "为什么 SMEAR 的“软合并”机制能够显著降低推理阶段的计算开销？",
+    "ground_truth": "因为无论路由策略给多少个专家分配了非零权重，SMEAR 都会在计算前向传播前将它们融合成一个标准尺寸的权重矩阵，其最终的推理计算成本等价于只通过一个单一专家网络。"
+  },
+  {
+    "question": "在 SMEAR 架构中，路由模块（Router）的输入依据通常是什么？",
+    "ground_truth": "通常是模型当前的输入特征或当前 Token/序列的隐藏层表示（Hidden States）。"
+  },
+  {
+    "question": "对于存在数据极度不平衡的多任务场景，SMEAR 的机制能带来什么好处？",
+    "ground_truth": "通过模块化设计和共享的软路由机制，可以让数据量较少（少样本）的任务在推理时借用或融合相关数据丰富任务的专家权重，实现知识的正向迁移。"
+  },
+  {
+    "question": "SMEAR 采用的参数空间软合并机制在训练优化的过程中，相比于硬路由有什么数学优势？",
+    "ground_truth": "软合并生成的路由概率是连续且平滑可导的。这避免了传统硬路由中由于离散选择导致的不可导问题，无需引入复杂的辅助负载均衡损失或强化学习策略。"
+  },
+  {
+    "question": "论文《Combining Modular Skills in Multitask Learning》是否提供了一套完全剔除 Transformer 多头注意力机制（MHA）的全新图神经网络公式？",
+    "ground_truth": "文档中未提及使用图神经网络替换多头注意力机制，该研究主要是关于专家模块的路由与合并机制。"
+  },
+  {
+    "question": "Pushing Mixture of Experts to the Limit 这篇论文是如何将传统的 MoE 架构推向“参数效率极限”的？",
+    "ground_truth": "作者将传统的全尺寸密集前馈网络（FFN）专家，替换成了极其轻量级的参数高效微调（PEFT）适配器，如提出 MoLORA 或 MoV 架构。"
+  },
+  {
+    "question": "MoLORA (Mixture of LoRA) 和 MoV 架构主要优化了训练环境中的哪类瓶颈？",
+    "ground_truth": "极大优化了训练需要更新的总参数量和显存占用瓶颈，使得即使专家数量增加，也可以在计算资源受限的环境中训练和微调 MoE 模型。"
+  },
+  {
+    "question": "根据论文实验，这种极致参数高效的 MoE（如更新少于 1% 规模的轻量级专家），能否匹敌全参数微调的表现？",
+    "ground_truth": "可以。论文指出其不仅明显优于标准的单一 PEFT 方法，甚至在指令微调任务上的表现能够与全参数微调（Full Fine-Tuning）相媲美。"
+  },
+  {
+    "question": "传统的 MoE 增加专家数量会导致总参数量激增，为什么 MoLORA 能有效缓解这一问题？",
+    "ground_truth": "因为 MoLORA 中的每个“专家”仅仅是一个低秩（Low-Rank）的矩阵模块，参数量极小，因此即便挂载多个专家，增加的总参数量也微乎其微。"
+  },
+  {
+    "question": "在进行指令微调（Instruction Tuning）时，MoV 机制相比于挂载单一向量适配器有什么架构优势？",
+    "ground_truth": "能够以极低的参数预算，利用专家的多样性和集成学习机制，增强大模型对复杂、多变指令格式的拟合和泛化能力。"
+  },
+  {
+    "question": "在 MoLORA 的联合训练过程中，门控网络（Gating Network）的参数也是被冻结的吗？",
+    "ground_truth": "不是。在指令微调期间，门控网络的参数是和这些轻量级 PEFT 专家一起联合更新的，以学习最佳的路由分配策略。"
+  },
+  {
+    "question": "该论文作者是否宣布他们成功将 MoLORA 部署到了搭载 1GB 内存的树莓派设备上并实现了每秒 100 词的生成？",
+    "ground_truth": "文档上下文中未提及在树莓派设备上的部署实验及每秒 100 词的生成速率。"
+  },
+  {
+    "question": "为了防止大模型在多任务微调中的干扰和灾难性遗忘，2403.03432 中的 MoA (Mixture-of-LoRAs) 架构首先采取了什么独立操作？",
+    "ground_truth": "首先使用各自对应的监督语料，独立训练多个特定领域（Domain-specific）的 LoRA 模块，避免数据混合在一起训练。"
+  },
+  {
+    "question": "MoA 架构是如何将这些独立训练的领域 LoRA 整合在一起服务于多任务学习的？",
+    "ground_truth": "引入了领域标签（Domain Labels）并结合显式路由策略（Explicit Routing Strategy），以此来调度和组合这些多路 LoRA 模块。"
+  },
+  {
+    "question": "该论文提到，MoA 架构在进行单一任务处理时，相较于只用该任务专属数据的普通 LoRA，有什么性能上的意外增益？",
+    "ground_truth": "通过显式路由机制组合其他领域的 LoRA 模块，模型能够学习并利用多任务之间的互补知识（Positive Transfer），从而进一步提升了单一任务的绝对性能。"
+  },
+  {
+    "question": "为什么 2403.03432 中的 MoA 被认为符合“混合专家（MoE）的专家设计原则”？",
+    "ground_truth": "因为架构中每一个被独立训练且专注于特定领域的 LoRA 模块，在功能和定位上就等同于 MoE 架构中具备高度专业化的“专家（Expert）”。"
+  },
+  {
+    "question": "这种基于多 LoRA 路由的架构如何帮助开发人员实现快速的领域自适应（Quick Domain-specific Adaptation）？",
+    "ground_truth": "开发人员只需针对新领域单独训练一个轻量级的 LoRA 模块并将其接入现有的路由架构即可，不需要干扰或重新训练已经建立的其他领域能力。"
+  },
+  {
+    "question": "对比传统的端到端多任务学习（将所有任务隐式融合），MoA 架构的主要创新在于哪里？",
+    "ground_truth": "创新在于采用了保留各任务独特专长的模块化显式组合机制。它避免了异构数据间的直接竞争和分布不平衡问题。"
+  },
+  {
+    "question": "该篇 MoA 论文中，是否介绍了一种名为“动态丢弃（Dynamic Dropout）”的技术来防止路由器在极少样本时过拟合？",
+    "ground_truth": "文档上下文中未提及“动态丢弃（Dynamic Dropout）”这项特定技术，主要论述的是领域标签和显式路由。"
+  },
+  {
+    "question": "结合 LoraHub 与 2403.03432 的 MoA 架构，两者在组合多个预训练 LoRA 模块时，最大的差异点是什么？",
+    "ground_truth": "LoraHub 的组合过程是“无需训练”的，仅通过启发式算法优化静态标量；而 2403.03432 的 MoA 则引入了显式路由模型，并需要在训练或微调阶段学习动态的路由分配机制。"
+  },
+  {
+    "question": "AdapterFusion 与 SMEAR 在推理阶段（Inference）的底层计算方式有何本质不同？",
+    "ground_truth": "AdapterFusion 需要计算多个专家的输出特征并在激活空间融合（计算开销大）；SMEAR 则是提前在参数空间对专家权重进行软合并，融合为一个矩阵后再进行推理（计算开销等同于单专家）。"
+  },
+  {
+    "question": "从工程落地角度看，本文档提供的多种 PEFT 组合方案（MoLORA, AdapterFusion, LoraHub）解决的一个核心共性瓶颈是什么？",
+    "ground_truth": "解决的共性瓶颈是：在有限计算资源和显存下，如何让单一庞大的基础模型同时且高效地具备处理多种复杂下游任务的能力，而避免反复从头全量微调。"
+  },
+  {
+    "question": "这 5 篇论文在改进大模型学习策略时，都不约而同地摒弃了什么传统的训练方法？",
+    "ground_truth": "都不约而同地摒弃了将基础大模型的所有参数全部解冻、连同庞大的密集前馈网络层进行整体全量微调（Full Fine-tuning）的传统高成本做法。"
+  },
+  {
+    "question": "综合上述研究，如果我要开发一个基于生物医学分子结构的实时 3D 渲染大模型，哪篇论文明确提供了最核心的 3D 物理引擎框架？",
+    "ground_truth": "这些文档中没有一篇提供生物医学领域的 3D 渲染框架或物理引擎，它们探讨的都是参数高效微调（PEFT）、多任务学习和语言模型层面的模块化路由机制。"
+  }
+]
