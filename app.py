@@ -257,13 +257,38 @@ class IndustrialPDFLearningAgent:
             return {"success": False, "message": str(e)}
 
     # --- 外部调用的接口保持不变 ---
-    def ask(self, question: str) -> str:
-        self.stats["questions_asked"] += 1
+
+    # ---------------------------------------------------------
+    # [优化 #3] Planning：判断问题是否需要分解为子任务
+    # ---------------------------------------------------------
+    def _plan(self, question: str) -> List[str]:
+        plan_prompt = (
+            f"判断以下问题是否复杂、需要分解为多个子问题来分别检索回答。\n"
+            f"如果需要，输出 2-4 个子问题，每行一个，不加序号；\n"
+            f"如果问题简单、一步可以回答，只输出 SIMPLE。\n\n"
+            f"问题：{question}"
+        )
+        result = self.fast_llm.invoke(plan_prompt).content.strip()
+        if "SIMPLE" in result.upper():
+            return []
+        sub_tasks = [q.strip() for q in result.split("\n") if q.strip()]
+        # 至少要有 2 个子任务才算真正的分解，否则视为简单问题
+        return sub_tasks if len(sub_tasks) >= 2 else []
+
+    def _synthesize(self, original_question: str, sub_answers: List[Tuple[str, str]]) -> str:
+        context = "\n\n".join([f"子问题：{q}\n回答：{a}" for q, a in sub_answers])
+        synth_prompt = (
+            f"以下是针对一个复杂问题拆解后各子问题的回答，请综合所有信息，"
+            f"给出对原始问题完整、连贯的最终回答。\n\n"
+            f"{context}\n\n"
+            f"原始问题：{original_question}"
+        )
+        return self.llm.invoke([HumanMessage(content=synth_prompt)]).content
+
+    # ReAct + 幻觉检测循环（单次执行单元）
+    def _run_once(self, question: str) -> str:
         config = {"configurable": {"thread_id": self.session_id}}
         original_question = question
-
-        # [优化 #1] ReAct Agent 自主决定调用哪个工具
-        # [优化 #2] 幻觉检测反思循环，最多重试 3 次
         for retry in range(4):
             self._last_retrieved_docs = ""
             result = self.app.invoke(
@@ -272,7 +297,6 @@ class IndustrialPDFLearningAgent:
             )
             answer = result["messages"][-1].content
 
-            # 只有调用了 search_pdf 工具才做幻觉检测
             if not self._last_retrieved_docs:
                 return answer
 
@@ -289,14 +313,12 @@ class IndustrialPDFLearningAgent:
             if not hallucination or retry >= 3:
                 if hallucination:
                     answer += "\n\n⚠️ **[系统校验提示]**：本回答部分内容可能未在当前文档的检索范围内明确提及，存在外部大模型知识（幻觉）的介入，请谨慎参考。"
-                # 记录 QA 历史到记忆库
                 self.memory_store.add_documents([Document(
                     page_content=f"问题: {original_question}\n回答: {answer}",
                     metadata={"user_id": self.user_id, "type": "qa_history"}
                 )])
                 return answer
 
-            # 重写问题，下一轮重新检索
             rewrite_prompt = (
                 f"原问题检索效果不佳，请重写以下问题使其更适合在学术文档中检索，"
                 f"要求更具体、使用专业术语：\n{original_question}"
@@ -305,6 +327,19 @@ class IndustrialPDFLearningAgent:
             print(f"[INFO] 重写后问题 (retry={retry+1})：{question}")
 
         return answer
+
+    def ask(self, question: str) -> str:
+        self.stats["questions_asked"] += 1
+
+        # [优化 #3] Plan-and-Execute：复杂问题先分解，再逐步执行，最后汇总
+        sub_tasks = self._plan(question)
+        if sub_tasks:
+            print(f"[INFO] 复杂问题，分解为 {len(sub_tasks)} 个子任务：{sub_tasks}")
+            sub_answers = [(q, self._run_once(q)) for q in sub_tasks]
+            return self._synthesize(question, sub_answers)
+
+        # 简单问题直接走 ReAct
+        return self._run_once(question)
 
     def add_note(self, content: str, concept: Optional[str] = None):
         doc = Document(
