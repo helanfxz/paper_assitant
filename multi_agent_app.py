@@ -1,3 +1,6 @@
+# multi_agent_app.py
+# 已被新模块化结构取代，入口改为 main.py。
+# 保留此文件仅供参考，不再维护。
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -190,7 +193,7 @@ class MultiAgentPDFLearningAgent:
     # 专家 Agent 构建：每个 Agent 是独立的 ReAct 子图
     # ==========================================================
 
-    def _build_sub_agent(self, tools: list, system_prompt: str):
+    def _build_sub_agent(self, tools: list, system_prompt: str, name: str = "Agent"):
         """
         通用子图工厂：构建一个标准 ReAct 子图。
         结构：START → agent ⇄ tools → END
@@ -201,12 +204,19 @@ class MultiAgentPDFLearningAgent:
 
         def agent_node(state: MessagesState):
             response = llm_with_tools.invoke([sys_msg] + state["messages"])
+            if hasattr(response, "tool_calls") and response.tool_calls:
+                for tc in response.tool_calls:
+                    print(f"  [{name}] 决策: 调用工具 {tc['name']} | 参数: {tc['args']}")
+            else:
+                print(f"  [{name}] 决策: 生成最终回答")
             return {"messages": [response]}
 
         def should_continue(state: MessagesState):
             last = state["messages"][-1]
             if hasattr(last, "tool_calls") and last.tool_calls:
+                print(f"  [{name}] → 执行工具节点")
                 return "tools"
+            print(f"  [{name}] → 回答完成，返回主图")
             return END
 
         graph = StateGraph(MessagesState)
@@ -236,15 +246,19 @@ class MultiAgentPDFLearningAgent:
                     name = getattr(m, "name", None) or "AI"
                     history_lines.append(f"{name}: {m.content}")
             history = "\n".join(history_lines)
-
+            print(f"历史信息:{history}")
             prompt = (
-                f"你是任务分配器，负责将用户请求路由给合适的专家 Agent。\n\n"
-                f"对话历史：\n{history}\n\n"
-                f"可选项（只输出其中一个单词，不要输出其他内容）：\n"
-                f"- ResearchAgent：用户需要查询 PDF 文档内容或学术知识\n"
-                f"- MemoryAgent：用户需要查询历史笔记、历史对话，或保存新笔记\n"
-                f"- GeneralAgent：用户在日常闲聊或查询统计信息\n"
-                f"- FINISH：已有专家回答了用户的问题，任务完成\n\n"
+                f"你是系统的主控路由节点。你的唯一任务是决定下一步的任务走向。\n\n"
+                f"【对话历史】：\n{history}\n\n"
+                f"【严格判断逻辑】：\n"
+                f"请重点关注对话历史的【最后一条消息】！\n"
+                f"🚨 规则1：如果最后一条消息是 'ResearchAgent'、'MemoryAgent' 或 'GeneralAgent' 发出的，并且它已经回答了用户的问题，你必须立刻输出：FINISH\n"
+                f"规则2：只有当用户的最新问题【还没有被任何人回答】时，你才从以下专家中选择一个派发：\n"
+                f"- ResearchAgent：处理 PDF 检索和学术问题\n"
+                f"- MemoryAgent：处理历史记忆和记笔记\n"
+                f"- GeneralAgent：处理闲聊和查询统计\n\n"
+                f"【输出要求】：\n"
+                f"仅输出一个词（FINISH, ResearchAgent, MemoryAgent, GeneralAgent），绝不能包含其他任何字符！\n"
                 f"输出："
             )
 
@@ -267,10 +281,13 @@ class MultiAgentPDFLearningAgent:
         research_agent = self._build_sub_agent(
             tools=self._make_research_tools(),
             system_prompt=(
-                "你是专业的学术文档检索与问答专家。"
-                "使用 search_pdf 工具在文档中检索相关内容，"
-                "基于检索结果忠实回答，不知则说不知。"
-            )
+                "你是专业的学术文档检索专家。\n"
+                "【🚨 核心工作纪律】：\n"
+                "传给你的消息列表中包含了过去的对话历史。这些历史【仅仅是为了让你理解上下文中的代词（如：它、这个）】。\n"
+                "你**必须且只能**针对用户的【最后一条最新提问】进行回答和工具调用！\n"
+                "绝对禁止去回答或检索历史记录中已经出现过的问题！"
+            ),
+            name="ResearchAgent"
         )
         memory_agent = self._build_sub_agent(
             tools=self._make_memory_tools(),
@@ -278,7 +295,8 @@ class MultiAgentPDFLearningAgent:
                 "你是用户的个人记忆管理专家。"
                 "使用 recall_memory 查询历史笔记和对话，"
                 "使用 add_note 保存用户的新笔记。"
-            )
+            ),
+            name="MemoryAgent"
         )
         general_agent = self._build_sub_agent(
             tools=self._make_general_tools(),
@@ -286,7 +304,8 @@ class MultiAgentPDFLearningAgent:
                 "你是友好的通用助手。"
                 "可以使用 get_stats 查询学习统计，"
                 "也可以直接回答日常问题，无需工具。"
-            )
+            ),
+            name="GeneralAgent"
         )
 
         # 将子图包装为主图的节点
@@ -295,18 +314,21 @@ class MultiAgentPDFLearningAgent:
             print("[Supervisor] → ResearchAgent")
             result = research_agent.invoke({"messages": state["messages"]})
             answer = result["messages"][-1].content
+            print(f"[ResearchAgent] 回答: {answer[:120]}{'...' if len(answer) > 120 else ''}")
             return {"messages": [AIMessage(content=answer, name="ResearchAgent")]}
 
         def memory_node(state: SupervisorState) -> dict:
             print("[Supervisor] → MemoryAgent")
             result = memory_agent.invoke({"messages": state["messages"]})
             answer = result["messages"][-1].content
+            print(f"[MemoryAgent] 回答: {answer[:120]}{'...' if len(answer) > 120 else ''}")
             return {"messages": [AIMessage(content=answer, name="MemoryAgent")]}
 
         def general_node(state: SupervisorState) -> dict:
             print("[Supervisor] → GeneralAgent")
             result = general_agent.invoke({"messages": state["messages"]})
             answer = result["messages"][-1].content
+            print(f"[GeneralAgent] 回答: {answer[:120]}{'...' if len(answer) > 120 else ''}")
             return {"messages": [AIMessage(content=answer, name="GeneralAgent")]}
 
         # 构建主图
@@ -377,6 +399,9 @@ class MultiAgentPDFLearningAgent:
     # ==========================================================
     def ask(self, question: str) -> str:
         self.stats["questions_asked"] += 1
+        print(f"\n{'='*55}")
+        print(f"[USER] {question}")
+        print(f"{'='*55}")
         config = {"configurable": {"thread_id": self.session_id}}
         result = self.app.invoke(
             {"messages": [HumanMessage(content=question)]},
@@ -385,6 +410,9 @@ class MultiAgentPDFLearningAgent:
         # 取最后一条有内容的 AI 消息作为最终回答
         for msg in reversed(result["messages"]):
             if isinstance(msg, AIMessage) and msg.content:
+                print(f"{'='*55}")
+                print(f"[最终回答] {msg.content[:200]}{'...' if len(msg.content) > 200 else ''}")
+                print(f"{'='*55}\n")
                 return msg.content
         return "抱歉，未能生成回答。"
 
