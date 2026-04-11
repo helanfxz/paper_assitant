@@ -15,21 +15,26 @@ PROMOTE_THRESHOLD = 3  # 重要性评分 >= 3 则晋升长期记忆
 def compress_window(app, config: dict, memory_store, user_id: str, session_id: str, fast_llm):
     """
     在 ask() 开始时调用。
-    若当前消息数超过 WINDOW_SIZE，压缩最早的 COMPRESS_BATCH 条，
+    若当前消息数超过 WINDOW_SIZE，压缩最早的 COMPRESS_BATCH 条对话消息（Human/AI），
     重要的晋升 Qdrant，全部替换为一条摘要 SystemMessage 写回 checkpointer。
+    跳过 SystemMessage（历史摘要），避免压缩内容为空或误删旧摘要。
     """
     state = app.get_state(config)
     messages = state.values.get("messages", [])
     if len(messages) <= WINDOW_SIZE:
         return
 
-    old_msgs = messages[:COMPRESS_BATCH]
-    rest = messages[COMPRESS_BATCH:]
+    # 只从 Human/AI 消息中取，跳过 SystemMessage
+    conv_msgs = [m for m in messages if isinstance(m, (HumanMessage, AIMessage))]
+    if len(conv_msgs) < COMPRESS_BATCH:
+        return
+
+    old_msgs = conv_msgs[:COMPRESS_BATCH]
 
     dialogue = "\n".join([
         f"{'用户' if isinstance(m, HumanMessage) else 'AI'}: {m.content[:300]}"
         for m in old_msgs
-        if hasattr(m, "content") and m.content
+        if m.content
     ])
 
     prompt = (
