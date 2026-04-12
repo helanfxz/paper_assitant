@@ -7,6 +7,7 @@
 from langchain_core.tools import tool
 from agents.base import build_sub_agent
 from document.registry import format_doc_list
+from concurrent.futures import ThreadPoolExecutor
 
 SYSTEM_PROMPT = (
     "你是专业的学术文档检索专家。\n"
@@ -73,17 +74,18 @@ def make_research_agent(llm, fast_llm, pdf_store, loaded_docs: list):
         print(f"  [ResearchAgent][TOOL] 扩展查询词: {search_queries}")
 
         print(f"  [ResearchAgent][TOOL] 向量检索中...")
-        all_child_docs = []
-        for q in search_queries:
-            # 有 source 过滤时，只召回指定文档的子块
+
+        def search_one(q):
             if source:
-                results = pdf_store.similarity_search(
+                return pdf_store.similarity_search(
                     q, k=3,
                     filter={"must": [{"key": "source", "match": {"value": source}}]}
                 )
-            else:
-                results = pdf_store.similarity_search(q, k=3)
-            all_child_docs.extend(results)
+            return pdf_store.similarity_search(q, k=3)
+
+        with ThreadPoolExecutor() as executor:
+            batches = list(executor.map(search_one, search_queries))
+        all_child_docs = [doc for batch in batches for doc in batch]
         print(f"  [ResearchAgent][TOOL] 召回子块数: {len(all_child_docs)}")
 
         parent_map = {}
