@@ -34,26 +34,52 @@ def init_qdrant(embeddings) -> tuple[QdrantClient, QdrantVectorStore, QdrantVect
 
 
 def build_memory_context(memory_store: QdrantVectorStore, user_id: str, session_id: str, question: str) -> str:
-    """用当前问题语义检索该 session 的长期记忆，返回注入用的上下文字符串。"""
+    """用当前问题语义检索该 session 的长期记忆，综合相似度和近期性排序后注入上下文。"""
     try:
-        docs = memory_store.similarity_search(
-            question, k=3,
+        results = memory_store.similarity_search_with_score(
+            question, k=10,
             filter={"must": [
                 {"key": "user_id", "match": {"value": user_id}},
                 {"key": "session_id", "match": {"value": session_id}},
             ]}
         )
     except Exception:
-        docs = []
+        results = []
 
-    if not docs:
+    if not results:
         return ""
 
-    facts = "\n".join([
-        f"- [{d.metadata.get('type', 'note')}] {d.page_content}"
-        for d in docs
-    ])
-    return f"【本会话的长期记忆】：\n{facts}\n请在回答时参考以上背景。"
+    now = datetime.now()
+    scored = []
+    for doc, similarity in results:
+        ts = doc.metadata.get("timestamp", "")
+        try:
+            days_ago = (now - datetime.fromisoformat(ts)).days
+        except Exception:
+            days_ago = 30
+        recency = 1 / (1 + days_ago)
+        score = 0.7 * similarity + 0.3 * recency
+        scored.append((doc, score))
+
+    scored.sort(key=lambda x: x[1], reverse=True)
+    top_docs = [doc for doc, score in scored[:3] if score >= 0.5]
+
+    if not top_docs:
+        return ""
+
+    facts = [d for d in top_docs if d.metadata.get("type") == "auto_fact"]
+    notes = [d for d in top_docs if d.metadata.get("type") == "note"]
+
+    parts = ["【本会话的长期记忆】："]
+    if facts:
+        parts.append("[事实]")
+        parts.extend(f"- {d.page_content}" for d in facts)
+    if notes:
+        parts.append("[笔记]")
+        parts.extend(f"- {d.page_content}" for d in notes)
+    parts.append("请在回答时参考以上背景。")
+
+    return "\n".join(parts)
 
 
 def save_fact(memory_store: QdrantVectorStore, content: str, user_id: str,

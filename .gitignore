@@ -11,3 +11,5 @@ step*.py
 *.json
 PLAN.md
 *.pyc
+面试问题.md
+.gitignore
