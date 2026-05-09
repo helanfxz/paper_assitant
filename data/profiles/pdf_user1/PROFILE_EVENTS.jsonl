@@ -1,0 +1,1 @@
+{"timestamp": "2026-05-05T10:10:51.217598", "user_id": "pdf_user1", "source_text": "", "confirmed": true, "is_preference": true, "scope": "global", "type": "format", "value": "尽量减少不必要的分点，优先使用段落叙述而非列举。", "operation": "add", "confidence": "high", "reason": "由主模型主动发起的长期偏好保存请求", "sensitive": false}

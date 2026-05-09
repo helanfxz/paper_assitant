@@ -1,171 +1,127 @@
-# 智能文档问答助手
+# 学术论文阅读助手
 
-基于 LangGraph + Qdrant 的企业级文档问答系统，支持 PDF 上传、智能检索、学习记录统计等功能。
+一个面向研究生和科研人员的论文阅读助手，当前采用“单循环 harness 应用 + 程序层控制”的实现方式，重点解决：
 
----
+- 论文检索与问答
+- 长对话续航
+- 跨 session 用户偏好记忆
+- 学习笔记沉淀
 
-## 项目简介
+## 当前架构
 
-用户可上传 PDF 文档，向助手提问文档相关内容；系统同时支持查询历史对话记忆和日常闲聊。助手还提供学习笔记管理与学习统计报告功能。
+项目已经从早期的 LangGraph 多节点实现，收敛为更轻量的单循环架构：
 
----
+- `main.py`
+  薄入口，只负责启动应用和兼容旧导出
+- `agent/app.py`
+  负责主循环编排、错误恢复接入、偏好检测与确认、会话消息提交
+- `agent/memory.py`
+  负责 Qdrant 记忆、滑动窗口压缩、用户偏好状态管理；其中 `UserPreferenceProfileStore` 管理跨 session 偏好
+- `tools.py`
+  负责运行时工具构建；`build_runtime_tools` 会按当前 session 注入文档检索、记忆回忆、笔记管理和统计工具
+- `agent/document.py`
+  负责 PDF 解析、父子块切分、文档元数据注册，以及把子块同步写入向量库和持久化词法索引
+- `lexical_index.py`
+  负责 SQLite 持久化词法索引，为 BM25 检索提供独立倒排索引
+- `session.py`
+  负责 session 元数据和消息历史持久化
+- `ui/gradio_app.py`
+  负责 Gradio 交互界面
 
-## 技术栈
+## 三层记忆
 
-| 模块 | 技术 |
-|------|------|
-| 工作流编排 | LangGraph (StateGraph) |
-| 向量数据库 | Qdrant |
-| LLM / Embedding | 智谱 GLM-5 / GLM-4-Flash / Embedding-3 |
-| PDF 解析 | PyMuPDF4LLM |
-| 前端 UI | Gradio |
-| 文本分割 | LangChain RecursiveCharacterTextSplitter |
+### 1. Profile Memory
 
----
+用户长期偏好，跨 session 持久化。
 
-## 项目结构
+- 不做检索
+- 每轮全量注入 system prompt
+- 采用 `scope + type` 槽位更新
+- 同槽位新值覆盖旧值
 
-```
-my_agent_project/
-├── app.py              # 主程序（核心逻辑 + Gradio UI）
-├── memory_data/        # 持久化记忆数据（无需查看）
-├── paper/              # 示例 PDF 文档
-├── result/             # 生成的学习报告
-└── venv/               # Python 虚拟环境
-```
+当前支持的偏好类型：
 
----
+- `language`
+- `format`
+- `detail_level`
+- `focus`
+- `avoid`
 
-## 核心架构
+当前支持的作用域：
 
-### LangGraph 状态定义（AgentState）
+- `global`
+- `paper_summary`
+- `paper_compare`
 
-```python
-class AgentState(TypedDict):
-    messages: List[BaseMessage]   # 对话历史
-    user_id: str                  # 用户标识
-    query: str                    # 当前问题
-    action_type: str              # 路由类型：pdf / memory / general
-    extended_queries: List[str]   # 多查询扩展结果
-    retrieved_docs: str           # 检索到的文档内容
-    retrieved_memory: str         # 检索到的记忆内容
-    final_answer: str             # 最终回答
-    hallucination_risk: bool      # 幻觉风险标记
-```
+### 2. Study Notes
 
-### 图结构（工作流）
+跨 session 的研究笔记，存放在独立的 `study_notes` collection 中。
 
-```
-START
-  └─→ [路由节点] ──→ retrieve_pdf_node   ──┐
-                 ├─→ recall_memory_node  ──┤
-                 └─→ general_chat_node   ──┤
-                                           ↓
-                                  generate_answer_node
-                                           ↓
-                                  verify_hallucination_node
-                                           ↓
-                                          END
-```
+- 用户主动保存
+- 支持单独 CRUD
+- 按问题语义检索
+- 有分数阈值过滤
+- 用于补充当前问题相关背景
 
----
+### 3. Session Memory
 
-## 详细流程
+长对话超过窗口后，会把旧消息压缩成摘要写入会话记忆库。
 
-### 1. 智能路由
+- 最近消息保留在消息窗口中
+- 更早消息压缩后保存在 Qdrant
+- 作用域仅限当前 session
 
-使用快速模型（GLM-4-Flash）对用户输入进行意图分类，输出三种路由：
+## 用户偏好写入流程
 
-- `pdf`：学术问题，需查阅文档知识库
-- `memory`：查询用户历史笔记或对话记录
-- `general`：日常闲聊或基础常识问答
+当前实现采用“规则筛选 + fast llm 分类 + 程序层确认”的 hybrid 方案：
 
-### 2. 检索节点（retrieve_pdf_node）
+1. 先用规则判断当前用户输入是否像长期偏好候选
+2. 只有命中候选时才调用 `fast_llm`
+3. `fast_llm` 只输出 JSON
+4. 程序用 `Pydantic` 验证 JSON 结构
+5. 根据置信度决定：
+   - `high`：自动保存
+   - `medium`：程序层发起确认
+   - `low`：不保存
+6. 删除、清空等敏感操作强制确认
 
-针对 `pdf` 类型问题，执行以下步骤：
+说明：
 
-1. **多查询扩展（MQE）**：用快速模型将原始问题扩展为 3 个不同表达的搜索词，加上原始问题共 4 条查询。
-2. **子块检索**：每条查询在 Qdrant 中检索 top-3 小块，共最多 12 个候选子块。
-3. **父子块映射（Small-to-Big）**：根据子块 metadata 中的 `parent_id` 取出对应父块文本，用哈希表去重，避免同一父块被重复加入。
-4. **LLM 轻量重排（Reranking）**：将最多 8 个父块文本交给快速模型，筛选并拼接与问题最相关的片段，作为最终上下文。
+- Profile 不是“碎片化记忆列表”，而是“当前生效的偏好状态”
+- 中置信度确认由程序层控制，不依赖模型自行记住
 
-### 3. 回忆节点（recall_memory_node）
+## 文档检索流程
 
-针对 `memory` 类型问题，按 `user_id` 过滤，在语义记忆库（`user_semantic_memory`）中检索最相似的 4 条历史记录（笔记或 QA 历史）。
+文档检索仍保留论文阅读助手的核心能力：
 
-### 4. 普通问答节点（general_chat_node）
+1. PDF 转 Markdown
+2. 父块 / 子块切分
+3. 子块同时写入 Qdrant 和持久化词法索引
+4. 检索时做 MQE 扩展查询
+5. 向量检索与 BM25 检索并行召回
+6. 用 RRF 融合多路 child chunk 结果
+7. 聚合父块
+8. 使用独立 `rerank_llm` 做最终重排
 
-针对 `general` 类型问题，不做额外检索，直接标记 `action_type`，由生成节点直接调用 LLM 回答。
+## 依赖
 
-### 5. 生成回答节点（generate_answer_node）
+当前核心依赖包括：
 
-根据 `action_type` 构造不同的 Prompt，调用主模型（GLM-5）生成回答：
+- `langchain_openai`
+- `langchain_qdrant`
+- `qdrant_client`
+- `pymupdf4llm`
+- `gradio`
+- `pydantic`
 
-- `pdf`：基于检索到的文档片段回答，要求忠于原文
-- `memory`：基于历史记忆回答
-- `general`：自然对话
-
-### 6. 幻觉检测节点（verify_hallucination_node）
-
-仅对 `pdf` 类型回答生效：
-
-- 让快速模型判断回答是否超出检索上下文范围
-- 若检测到幻觉（`FAIL`），在回答末尾追加警告提示
-- 无论是否通过，将本次 QA 记录存入语义记忆库，供后续 `memory` 查询使用
-
-> 注：当前代码中幻觉检测后直接结束，介绍中提到的"重写问题重试（最多3次）"为设计规划，尚未在代码中实现。
-
----
-
-## 文档入库流程
-
-使用 `load_document(pdf_path)` 方法：
-
-1. **PDF 解析**：通过 `pymupdf4llm.to_markdown()` 将 PDF 转为 Markdown 文本，保留结构信息。
-2. **父块切分**：`chunk_size=1500, overlap=200`，生成语义完整的大段落（父块）。
-3. **子块切分**：对每个父块再用 `chunk_size=400, overlap=50` 切分为小块（子块）。
-4. **元数据注入**：每个子块的 metadata 包含：
-   - `parent_id`：父块唯一 ID（UUID）
-   - `parent_text`：父块原文（用于 Small-to-Big 检索回溯）
-   - `source`：文件名
-   - `user_id`：用户 ID
-5. **入库**：仅将子块向量化存入 Qdrant `pdf_knowledge` 集合，检索时通过 metadata 回溯父块内容。
-
----
-
-## Qdrant 集合说明
-
-| 集合名 | 用途 | 向量维度 |
-|--------|------|----------|
-| `pdf_knowledge` | 存储文档子块向量 | 2048 |
-| `user_semantic_memory` | 存储用户笔记和 QA 历史 | 2048 |
-
----
-
-## Gradio UI 功能
-
-| Tab | 功能 |
-|-----|------|
-| 开始使用 | 初始化助手（输入用户ID）、上传并加载 PDF、重置数据库 |
-| 智能问答 | 多轮对话，自动路由到文档检索 / 记忆查询 / 闲聊 |
-| 学习笔记 | 手动添加笔记，关联概念标签，存入语义记忆库 |
-| 学习统计 | 查看会话统计数据，生成并保存学习报告 |
-
----
-
-## 快速启动
+## 启动方式
 
 ```bash
-# 1. 安装依赖
-pip install -r requirements.txt
+./venv/bin/python main.py
+```
 
-# 2. 配置环境变量（.env 文件）
-ZHIPU_API_KEY=your_key
-ZHIPU_URL=https://open.bigmodel.cn/api/paas/v4/
-QDRANT_URL=http://localhost:6333
-QDRANT_API_KEY=your_qdrant_key  # 可选
+如果需要手动安装新增依赖：
 
-# 3. 启动服务
-python app.py
-# 访问 http://localhost:7860
+```bash
+./venv/bin/pip install pydantic
 ```
