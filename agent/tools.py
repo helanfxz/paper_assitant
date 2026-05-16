@@ -12,12 +12,20 @@ from datetime import datetime
 from typing import Any
 from uuid import uuid4
 
-from agent.error_recovery import ModelRecoveryManager
+from qdrant_client.models import FieldCondition, Filter, MatchValue
+
+from agent.error_recovery import (
+    DEPENDENCY_UNAVAILABLE_ERROR,
+    EMPTY_RESULT_ERROR,
+    ModelRecoveryManager,
+    ToolCallResult,
+)
 from langchain_core.documents import Document
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
 from agent.document import format_doc_list
+from agent.utils import clean_query, extract_payload_metadata
 from agent.memory import (
     LEGACY_AUTO_FACT_TYPE,
     PDF_COLLECTION_NAME,
@@ -38,6 +46,62 @@ VECTOR_TOP_K = 3  # 每条扩展查询的向量候选数量。
 BM25_TOP_K = 3  # 每条扩展查询的词法候选数量。
 RRF_K = 60  # Reciprocal Rank Fusion 平滑参数。
 RERANK_PARENT_LIMIT = 8  # 进入最终 rerank 的父块上限。
+
+
+def _fetch_parent_texts_by_ids(pdf_store, parent_ids: list[str]) -> dict[str, str]:
+    """批量按 parent_id 从 Qdrant 拉取父块文本，避免 N+1 查询。
+
+    一次 scroll 使用 MatchAny 过滤，取回所有匹配的 chunk。
+    返回 {parent_id: parent_text} 映射（同一 parent 只保留第一条）。
+    """
+    result: dict[str, str] = {}
+    if not parent_ids:
+        return result
+    try:
+        client = getattr(pdf_store, "client", None)
+        if client is None:
+            return result
+        from qdrant_client.models import MatchAny
+
+        collection_name = str(getattr(pdf_store, "collection_name", "pdf_knowledge"))
+        points, _ = client.scroll(
+            collection_name=collection_name,
+            scroll_filter=Filter(
+                must=[FieldCondition(key="parent_id", match=MatchAny(any=list(set(parent_ids))))]
+            ),
+            limit=len(set(parent_ids)),
+            with_payload=True,
+            with_vectors=False,
+        )
+        for point in points:
+            payload = point.payload or {}
+            pid = str(payload.get("parent_id", "")).strip()
+            if pid and pid not in result:
+                parent_text = str(payload.get("parent_text", "")).strip()
+                if parent_text:
+                    result[pid] = parent_text
+    except Exception as exc:
+        print(f"[SearchPDF] 批量跨页上下文拉取失败，已跳过: {exc}")
+    return result
+
+
+def format_pdf_parent_record(parent_record: dict[str, object]) -> str:
+    """把父块和证据 metadata 格式化为模型可读检索结果。"""
+    source_name = str(parent_record.get("source", "")).strip()
+    page_number = parent_record.get("page_number", "")
+    page_type = str(parent_record.get("page_type", "")).strip() or "unknown"
+    content_source = str(parent_record.get("content_source", "")).strip() or "unknown"
+    generated = bool(parent_record.get("generated", False))
+    parent_text = str(parent_record.get("parent_text", "")).strip()
+    generated_label = "是" if generated else "否"
+    return (
+        f"来源文档：{source_name}\n"
+        f"页码：{page_number or '未知'}\n"
+        f"页面类型：{page_type}\n"
+        f"来源类型：{content_source}\n"
+        f"自动生成内容：{generated_label}\n"
+        f"{parent_text}"
+    )
 
 
 class QueryExpansionResult(BaseModel):
@@ -112,7 +176,7 @@ def _deduplicate_queries(queries: list[str]) -> list[str]:
     seen_normalized: list[str] = []
 
     for raw_query in queries:
-        cleaned_query = " ".join(str(raw_query).strip().split())
+        cleaned_query = clean_query(raw_query)
         if not cleaned_query:
             continue
 
@@ -138,11 +202,11 @@ def _deduplicate_queries(queries: list[str]) -> list[str]:
     return unique_queries
 
 
-def _expand_queries(query: str, fast_llm, recovery_manager: ModelRecoveryManager) -> list[str]:
+def _expand_queries(query: str, fast_llm, recovery_manager: ModelRecoveryManager) -> tuple[list[str], str]:
     """用 few-shot MQE 生成补充查询，提升混合检索的召回覆盖面。"""
-    cleaned_query = " ".join(query.strip().split())
+    cleaned_query = clean_query(query)
     if len(cleaned_query) < MQE_MIN_QUERY_LEN:
-        return [cleaned_query]
+        return [cleaned_query], ""
 
     mqe_prompt = (
         "你在为学术论文检索生成查询扩展。目标是补充不同检索角度，不是简单改写原句。\n"
@@ -174,11 +238,13 @@ def _expand_queries(query: str, fast_llm, recovery_manager: ModelRecoveryManager
     )
     if expansion_result.ok:
         candidate_queries = [cleaned_query, *expansion_result.value.queries]
+        fallback_message = ""
     else:
         candidate_queries = [cleaned_query]
+        fallback_message = expansion_result.message or "MQE 查询扩展失败，已退化为原始 query。"
 
     deduplicated_queries = _deduplicate_queries(candidate_queries)
-    return deduplicated_queries or [cleaned_query]
+    return deduplicated_queries or [cleaned_query], fallback_message
 
 
 def _rrf_fuse_ranked_lists(ranked_lists: list[list[Document]]) -> list[tuple[Document, float]]:
@@ -241,8 +307,7 @@ def build_runtime_tools(
                 with_vectors=False,
             )
             for point in points:
-                payload = point.payload if isinstance(point.payload, dict) else {}
-                metadata = payload.get("metadata", {}) if isinstance(payload.get("metadata"), dict) else payload
+                metadata = extract_payload_metadata(point.payload if isinstance(point.payload, dict) else None)
                 source_name = str(metadata.get("source", "")).strip()
                 if source_name:
                     sources.add(source_name)
@@ -260,12 +325,15 @@ def build_runtime_tools(
     @tool
     def search_pdf(query: str, source: str = "") -> str:
         """在当前用户的论文库中检索相关内容，返回最相关的父块片段。"""
-        cleaned_query = " ".join(query.strip().split())
+        cleaned_query = clean_query(query)
         cleaned_source = source.strip()
         if not cleaned_query:
             return "检索失败：query 不能为空。"
 
-        expanded_queries = _expand_queries(cleaned_query, fast_llm, recovery_manager)
+        fallback_messages: list[str] = []
+        expanded_queries, mqe_fallback_message = _expand_queries(cleaned_query, fast_llm, recovery_manager)
+        if mqe_fallback_message:
+            fallback_messages.append(mqe_fallback_message)
 
         lexical_search_enabled = True
         # 先确保旧文档也已经补建 lexical index，避免新老数据检索表现不一致。
@@ -278,6 +346,7 @@ def build_runtime_tools(
             )
         except Exception as exc:
             lexical_search_enabled = False
+            fallback_messages.append(f"词法索引回补失败，已退化为纯向量检索：{exc}")
             print(f"[Retrieval] 词法索引回补失败，退化为纯向量检索: {exc}")
 
         vector_filter = None
@@ -313,13 +382,30 @@ def build_runtime_tools(
                     ranked_lists.append(future.result())
                 except Exception as exc:
                     failed_routes += 1
+                    fallback_messages.append(f"单路检索失败，已跳过：{exc}")
                     print(f"[Retrieval] 单路检索失败，已跳过: {exc}")
 
         fused_ranked_children = _rrf_fuse_ranked_lists(ranked_lists)
         if not fused_ranked_children and failed_routes:
-            raise RuntimeError("向量检索与词法检索均未返回可用结果")
+            return ToolCallResult(
+                ok=False,
+                content="向量检索与词法检索均未返回可用结果。",
+                error_type=DEPENDENCY_UNAVAILABLE_ERROR,
+                message="search_pdf 的检索依赖不可用",
+                recoverable=False,
+                suggested_next_action="请不要继续重复调用 search_pdf，基于已有上下文说明检索失败。",
+                used_fallback=bool(fallback_messages),
+            )
         if not fused_ranked_children:
-            return "未找到相关内容。"
+            return ToolCallResult(
+                ok=True,
+                content="未找到相关内容。",
+                error_type=EMPTY_RESULT_ERROR,
+                message="search_pdf 未检索到相关内容",
+                recoverable=True,
+                suggested_next_action="可以换一个更具体的 query 继续检索，或基于没有检索结果的事实回答。",
+                used_fallback=bool(fallback_messages),
+            )
 
         # RRF 仍然是在 child chunk 层融合，这一层负责补召回和排序。
         # 最后交给主模型使用的仍然应该是父块，以保留更完整的上下文。
@@ -335,12 +421,26 @@ def build_runtime_tools(
                     "score": 0.0,
                     "parent_text": str(child_doc.metadata.get("parent_text", child_doc.page_content)),
                     "source": str(child_doc.metadata.get("source", "")),
+                    "page_number": child_doc.metadata.get("page_number", ""),
+                    "page_type": str(child_doc.metadata.get("page_type", "")),
+                    "content_source": str(child_doc.metadata.get("content_source", "")),
+                    "generated": bool(child_doc.metadata.get("generated", False)),
+                    "next_parent_id": str(child_doc.metadata.get("next_parent_id", "")),
+                    "prev_parent_id": str(child_doc.metadata.get("prev_parent_id", "")),
                 },
             )
             parent_record["score"] = float(parent_record["score"]) + fused_score
 
         if not parent_hits:
-            return "未找到相关内容。"
+            return ToolCallResult(
+                ok=True,
+                content="未找到相关内容。",
+                error_type=EMPTY_RESULT_ERROR,
+                message="search_pdf 没有可用父块结果",
+                recoverable=True,
+                suggested_next_action="可以换一个更具体的 query 继续检索，或基于没有检索结果的事实回答。",
+                used_fallback=bool(fallback_messages),
+            )
 
         ranked_parents = sorted(
             parent_hits.items(),
@@ -353,6 +453,7 @@ def build_runtime_tools(
             for _, parent_record in ranked_parents
             if str(parent_record["parent_text"]).strip()
         ]
+        linked_texts: dict[str, str] = {}
         if candidate_texts:
             try:
                 rerank_hits = rerank_llm.rerank(
@@ -361,27 +462,99 @@ def build_runtime_tools(
                     top_n=min(3, len(candidate_texts)),
                 )
                 reranked_blocks: list[str] = []
+                # 收集跨页链接，批量拉取邻页内容
+                linked_pids: list[tuple[int, str, str]] = []  # (hit_index, link_key, label)
+                for hit_idx, (_, parent_record) in enumerate(ranked_parents):
+                    for link_key, label in [
+                        ("next_parent_id", "下一页"),
+                        ("prev_parent_id", "前一页"),
+                    ]:
+                        linked_pid = str(parent_record.get(link_key, "")).strip()
+                        if linked_pid:
+                            linked_pids.append((hit_idx, linked_pid, label))
+                linked_texts = _fetch_parent_texts_by_ids(
+                    pdf_store, [pid for _, pid, _ in linked_pids]
+                )
                 for hit in rerank_hits[:3]:
                     _, parent_record = ranked_parents[hit.index]
-                    source_name = str(parent_record.get("source", "")).strip()
                     parent_text = str(parent_record.get("parent_text", "")).strip()
-                    if parent_text:
-                        reranked_blocks.append(f"来源文档：{source_name}\n{parent_text}")
+                    if not parent_text:
+                        continue
+                    block = format_pdf_parent_record(parent_record)
+                    for hit_idx, linked_pid, label in linked_pids:
+                        if hit_idx == hit.index:
+                            linked_text = linked_texts.get(linked_pid, "")
+                            if linked_text:
+                                block += f"\n（{label}补充内容）：{linked_text[:600]}"
+                    reranked_blocks.append(block)
                 if reranked_blocks:
-                    return "\n\n".join(reranked_blocks)
+                    result_content = "\n\n".join(reranked_blocks)
+                    if fallback_messages:
+                        return ToolCallResult(
+                            ok=True,
+                            content=result_content,
+                            message="search_pdf 已返回结果，但检索链路中使用了部分降级路径",
+                            used_fallback=True,
+                            recoverable=True,
+                            suggested_next_action="可以基于当前检索结果回答；如信息不足，再决定是否补充检索。",
+                        )
+                    return result_content
             except Exception as exc:
+                fallback_messages.append(f"rerank 失败，已使用 RRF 融合结果：{exc}")
                 print(f"[Retrieval] rerank 失败，使用混合检索结果: {exc}")
 
         fallback_blocks = [
-            str(parent_record["parent_text"]).strip()
+            format_pdf_parent_record(parent_record)
             for _, parent_record in ranked_parents[:2]
         ]
-        return "\n\n".join(block for block in fallback_blocks if block) or "未找到相关内容。"
+        # 跨页上下文补充（复用 rerank 路径已构建的 linked_texts，或按需重建）
+        if len(ranked_parents) > 0 and not linked_texts:
+            fb_pids: list[str] = []
+            for _, parent_record in ranked_parents[:2]:
+                for link_key in ("next_parent_id", "prev_parent_id"):
+                    linked_pid = str(parent_record.get(link_key, "")).strip()
+                    if linked_pid:
+                        fb_pids.append(linked_pid)
+            if fb_pids:
+                linked_texts = _fetch_parent_texts_by_ids(pdf_store, fb_pids)
+        for i, (_, parent_record) in enumerate(ranked_parents[:2]):
+            if i >= len(fallback_blocks):
+                break
+            for link_key, label in [
+                ("next_parent_id", "下一页"),
+                ("prev_parent_id", "前一页"),
+            ]:
+                linked_pid = str(parent_record.get(link_key, "")).strip()
+                if linked_pid:
+                    linked_text = linked_texts.get(linked_pid, "")
+                    if linked_text:
+                        fallback_blocks[i] += (
+                            f"\n（{label}补充内容）：{linked_text[:600]}"
+                        )
+        fallback_content = "\n\n".join(block for block in fallback_blocks if block)
+        if fallback_content:
+            return ToolCallResult(
+                ok=True,
+                content=fallback_content,
+                message="search_pdf 已返回 RRF 融合结果",
+                used_fallback=True,
+                recoverable=True,
+                suggested_next_action="rerank 不可用或没有返回有效结果，请基于当前 RRF 融合结果回答，不要因为 rerank 失败重复检索。",
+            )
+        return ToolCallResult(
+            ok=True,
+            content="未找到相关内容。",
+            error_type=EMPTY_RESULT_ERROR,
+            message="search_pdf 没有可返回的父块内容",
+            recoverable=True,
+            suggested_next_action="可以换一个更具体的 query 继续检索，或基于没有检索结果的事实回答。",
+            used_fallback=bool(fallback_messages),
+        )
 
     @tool
     def recall_memory(query: str, memory_type: str = "session_summary") -> str:
         """显式查询当前会话的压缩摘要，帮助模型回看超出窗口的历史信息。"""
-        cleaned_query = " ".join(query.strip().split())
+        cleaned_query = clean_query(query)
         if not cleaned_query:
             return "查询失败：query 不能为空。"
         if memory_type not in {"session_summary", "all"}:
@@ -601,7 +774,7 @@ def build_runtime_tools(
     @tool
     def search_notes(query: str) -> str:
         """按语义检索研究笔记，返回最相关的已保存笔记。"""
-        cleaned_query = " ".join(query.strip().split())
+        cleaned_query = clean_query(query)
         if not cleaned_query:
             return "查询失败：query 不能为空。"
 

@@ -5,6 +5,7 @@ venv
 test.py
 plan.md
 .claude
+.cache/
 result
 calculate_f1.py
 step*.py

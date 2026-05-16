@@ -4,7 +4,13 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
-from agent.error_recovery import ToolRecoveryManager
+from agent.error_recovery import (
+    TOOL_TYPE_HIGH_RISK,
+    TOOL_TYPE_READ,
+    TOOL_TYPE_WRITE,
+    ToolCallResult,
+    ToolRecoveryManager,
+)
 from agent.hook import Hook, HookContext
 from agent.provider import CONTEXT_TOO_LONG_ERROR, LLMResponse, Provider
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
@@ -83,53 +89,54 @@ class AgentRunner:
         self,
         tool_calls: list[dict[str, Any]],
         turn_messages: list[dict[str, Any]],
-    ) -> list[Any]:
+    ) -> list[ToolCallResult]:
         """执行本轮工具调用，并把 tool message 写回本轮消息列表。"""
-        read_tools_with_recovery = {
+        read_tools = {
+            "load_skill",
             "list_documents",
             "search_pdf",
             "recall_memory",
             "list_notes",
             "search_notes",
             "get_stats",
+            "list_todos",
         }
-        write_tools_with_recovery = {"save_note", "update_note", "delete_note"}
+        write_tools = {
+            "save_note",
+            "update_note",
+            "save_preference",
+            "save_todo",
+            "update_todo_status",
+        }
+        high_risk_tools = {"delete_note", "delete_todo"}
 
-        tool_results: list[Any] = []
-        for tool_call in tool_calls:
+        tool_results: list[ToolCallResult] = []
+        for index, tool_call in enumerate(tool_calls):
             tool_name = tool_call["name"]
             tool_args = tool_call["args"]
             tool_impl = self.tools_by_name.get(tool_name)
             print(f"  [Tool] {tool_name} | 参数: {tool_args}")
 
-            tool_call_result = None
-            if tool_name in read_tools_with_recovery:
-                tool_call_result = self.tool_recovery.invoke_read_tool(
-                    tool_name,
-                    tool_impl,
-                    tool_args,
-                )
-            elif tool_name in write_tools_with_recovery:
-                tool_call_result = self.tool_recovery.invoke_write_tool(
-                    tool_name,
-                    tool_impl,
-                    tool_args,
-                )
-
-            if tool_call_result is not None:
-                tool_result = tool_call_result.content
-                if not tool_call_result.ok:
-                    print(f"  [Tool] {tool_name} 失败: {tool_call_result.message}")
+            if tool_name in high_risk_tools:
+                fallback_type = TOOL_TYPE_HIGH_RISK
+            elif tool_name in write_tools:
+                fallback_type = TOOL_TYPE_WRITE
+            elif tool_name in read_tools:
+                fallback_type = TOOL_TYPE_READ
             else:
-                try:
-                    tool_result = (
-                        tool_impl.invoke(tool_args)
-                        if tool_impl
-                        else f"未知工具: {tool_name}"
-                    )
-                except Exception as exc:
-                    tool_result = f"工具执行失败: {exc}"
-                    print(f"  [Tool] {tool_name} 失败: {exc}")
+                fallback_type = TOOL_TYPE_READ
+
+            tool_call_result = self.tool_recovery.invoke_tool(
+                tool_name,
+                tool_impl,
+                tool_args,
+                fallback_type=fallback_type,
+            )
+            tool_result = tool_call_result.to_observation(tool_name)
+            if not tool_call_result.ok:
+                print(f"  [Tool] {tool_name} 失败: {tool_call_result.message}")
+            elif tool_call_result.used_fallback or tool_call_result.error_type:
+                print(f"  [Tool] {tool_name} 降级/状态: {tool_call_result.message}")
 
             turn_messages.append(
                 {
@@ -139,9 +146,51 @@ class AgentRunner:
                     "name": tool_name,
                 }
             )
-            tool_results.append(tool_result)
+            tool_results.append(tool_call_result)
+
+            if tool_call_result.should_stop:
+                print(f"  [Tool] {tool_name} 要求停止本轮工具链: {tool_call_result.message}")
+                for skipped_call in tool_calls[index + 1:]:
+                    skipped_name = skipped_call.get("name", "")
+                    skipped_result = ToolCallResult(
+                        ok=False,
+                        content="前一个工具失败且要求停止，本工具未执行。",
+                        error_type="skipped",
+                        message=f"{skipped_name} 未执行",
+                        should_stop=True,
+                        recoverable=False,
+                        suggested_next_action="请不要继续执行剩余工具，直接向用户说明当前操作未完成。",
+                        tool_type=fallback_type,
+                    )
+                    turn_messages.append(
+                        {
+                            "role": "tool",
+                            "content": skipped_result.to_observation(skipped_name),
+                            "tool_call_id": skipped_call.get("id", ""),
+                            "name": skipped_name,
+                        }
+                    )
+                    tool_results.append(skipped_result)
+                break
 
         return tool_results
+
+    def _finalize_without_tools(
+        self,
+        system_prompt: str,
+        turn_messages: list[dict[str, Any]],
+        instruction: str,
+        fallback: str,
+    ) -> str:
+        """用未绑定工具的模型收口，避免失败后继续触发工具调用。"""
+        turn_messages.append({"role": "user", "content": instruction, "hidden": True})
+        llm_messages = self._build_llm_messages(system_prompt, turn_messages)
+        model_response = self.final_provider.chat_with_retry(llm_messages)
+        if model_response.finish_reason == "error":
+            print(f"[Runner] 无工具收口失败: {model_response.error}")
+        final_answer = model_response.content or fallback
+        turn_messages.append({"role": "assistant", "content": final_answer})
+        return final_answer
 
     def _call_model(
         self,
@@ -294,6 +343,22 @@ class AgentRunner:
             tool_results = self._run_tools(context.tool_calls, turn_messages)
             print(f"[Runner] 工具执行完成，结果数: {len(tool_results)}")
             context.tool_results = tool_results
+            stop_result = next((result for result in tool_results if result.should_stop), None)
+            if stop_result is not None:
+                context.error = stop_result.message or stop_result.error_type
+                final_answer = self._finalize_without_tools(
+                    system_prompt,
+                    turn_messages,
+                    (
+                        "刚才的工具执行失败，且该失败不应该继续重试或继续调用工具。"
+                        "请不要再调用工具，直接向用户说明哪些操作没有完成、失败原因是什么，"
+                        "以及用户接下来可以怎么处理。"
+                    ),
+                    fallback=stop_result.content or FALLBACK_REPLY,
+                )
+                context.final_content = final_answer
+                self.hook.after_iteration(context)
+                break
             self.hook.after_iteration(context)
 
         return final_answer

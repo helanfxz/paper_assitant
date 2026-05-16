@@ -8,9 +8,9 @@ from typing import Any, Callable
 from langchain_core.tools import BaseTool
 from langchain_qdrant import QdrantVectorStore
 
-from agent.config import get_embeddings, get_fast_llm, get_llm, get_reranker
+from agent.config import get_embeddings, get_fast_llm, get_llm, get_reranker, get_vision_llm
 from agent.context import SystemContextBuilder
-from agent.document import ensure_document_registry_from_vector_store, load_document
+from agent.document import DocumentIngestionJobRegistry, ensure_document_registry_from_vector_store, load_document
 from agent.error_recovery import ModelRecoveryManager, ToolRecoveryManager
 from agent.hook import ConfirmHook
 from agent.memory import (
@@ -29,6 +29,7 @@ from agent.runner import AgentRunner
 from agent.session import Session, SessionManager, get_sessions
 from agent.skill import SkillLoader
 from agent.tools import build_runtime_tools
+from agent.vision_analyzer import VisionAnalyzer
 from lexical_index import PersistentLexicalIndex
 
 
@@ -74,6 +75,7 @@ class AgentLoop:
         self.rerank_llm = get_reranker()
         self.recovery = ModelRecoveryManager()
         self.tool_recovery = ToolRecoveryManager()
+        self.document_ingestion_jobs = DocumentIngestionJobRegistry()
         self.lexical_index = PersistentLexicalIndex()
         self.skill_loader = SkillLoader()
         embeddings = get_embeddings()
@@ -388,18 +390,26 @@ class AgentLoop:
         tool_name = str(action.get("tool_name", "")).strip()
         tool_args = action.get("tool_args", {}) or {}
         tool_impl = self.tools_by_name.get(tool_name)
-        if tool_impl is None:
-            return f"待确认工具 {tool_name} 尚未实现。"
-        try:
-            result = str(tool_impl.invoke(tool_args))
-            print(f"[Confirm] 执行结果: {result}")
-            return result
-        except Exception as exc:
-            print(f"[Confirm] 执行失败: {exc}")
-            return f"待确认操作执行失败：{exc}"
+        tool_result = self.tool_recovery.invoke_tool(tool_name, tool_impl, tool_args)
+        rendered_result = tool_result.to_observation(tool_name)
+        if tool_result.ok:
+            print(f"[Confirm] 执行结果: {tool_result.content}")
+        else:
+            print(f"[Confirm] 执行失败: {tool_result.message}")
+        return rendered_result
 
-    def load_document(self, pdf_path: str) -> dict[str, Any]:
+    def load_document(
+        self,
+        pdf_path: str,
+        include_visual_descriptions: bool = False,
+        progress_callback=None,
+    ) -> dict[str, Any]:
         """供 UI 触发文档入库，并同步更新当前会话状态。"""
+        vision_analyzer = (
+            VisionAnalyzer(vision_llm=get_vision_llm())
+            if include_visual_descriptions
+            else None
+        )
         load_result = load_document(
             pdf_path,
             self.pdf_store,
@@ -407,6 +417,9 @@ class AgentLoop:
             fast_llm=self.fast_llm,
             lexical_index=self.lexical_index,
             recovery_manager=self.recovery,
+            include_visual_descriptions=include_visual_descriptions,
+            vision_analyzer=vision_analyzer,
+            progress_callback=progress_callback,
         )
         if load_result["success"]:
             self.session_stats["docs_loaded"] += 1
@@ -414,6 +427,25 @@ class AgentLoop:
             if document_name not in self.loaded_document_names:
                 self.loaded_document_names.append(document_name)
         return load_result
+
+    def start_document_ingestion(
+        self,
+        pdf_path: str,
+        include_visual_descriptions: bool = False,
+    ) -> dict[str, Any]:
+        """创建后台 PDF 入库任务，供 UI 轮询状态。"""
+        return self.document_ingestion_jobs.submit(
+            description=f"加载文档：{pdf_path}",
+            worker=lambda progress_callback: self.load_document(
+                pdf_path,
+                include_visual_descriptions=include_visual_descriptions,
+                progress_callback=progress_callback,
+            ),
+        )
+
+    def get_document_ingestion_job(self, job_id: str) -> dict[str, Any]:
+        """读取后台 PDF 入库任务状态。"""
+        return self.document_ingestion_jobs.get(job_id)
 
     def list_notes(self) -> list[dict[str, str]]:
         """列出当前用户的研究笔记。"""

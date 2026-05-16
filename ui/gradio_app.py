@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import queue
 import threading
+import time
 from typing import Any
 
 import gradio as gr
@@ -111,13 +112,43 @@ def create_gradio_ui(app_factory):
             "",
         )
 
-    def load_pdf(pdf_file):
+    def _format_ingestion_job(job: dict[str, Any]) -> str:
+        status_label = {
+            "queued": "排队中",
+            "running": "处理中",
+            "succeeded": "完成",
+            "failed": "失败",
+            "missing": "未找到",
+        }.get(str(job.get("status", "")), str(job.get("status", "")))
+        lines = [
+            f"任务：{job.get('job_id', '')}",
+            f"状态：{status_label}",
+            f"进度：{int(job.get('progress', 0) or 0)}%",
+            str(job.get("message", "")).strip(),
+        ]
+        return "\n".join(line for line in lines if line)
+
+    def load_pdf(pdf_file, include_visual_descriptions: bool):
         if state["app"] is None:
-            return "请先新建或选择会话。"
+            yield "请先新建或选择会话。"
+            return
         if pdf_file is None:
-            return "请先上传 PDF 文件。"
-        result = state["app"].load_document(pdf_file)
-        return f"成功：{result['message']}" if result["success"] else f"失败：{result['message']}"
+            yield "请先上传 PDF 文件。"
+            return
+
+        job = state["app"].start_document_ingestion(
+            pdf_file,
+            include_visual_descriptions=bool(include_visual_descriptions),
+        )
+        yield _format_ingestion_job(job)
+
+        job_id = str(job.get("job_id", ""))
+        while job_id:
+            time.sleep(0.5)
+            current_job = state["app"].get_document_ingestion_job(job_id)
+            yield _format_ingestion_job(current_job)
+            if current_job.get("status") in {"succeeded", "failed", "missing"}:
+                return
 
     def chat(message: str, history: list[list[str]] | None):
         """流式聊天生成器。"""
@@ -290,9 +321,13 @@ def create_gradio_ui(app_factory):
                         file_types=[".pdf"],
                         type="filepath",
                     )
+                    visual_checkbox = gr.Checkbox(
+                        label="启用表格/图表增强（较慢）",
+                        value=False,
+                    )
                     load_btn = gr.Button("加载文档", size="sm")
                     load_output = gr.Textbox(label="状态", interactive=False, lines=2)
-                    load_btn.click(load_pdf, inputs=[pdf_upload], outputs=[load_output])
+                    load_btn.click(load_pdf, inputs=[pdf_upload, visual_checkbox], outputs=[load_output])
 
                 with gr.Accordion("研究笔记", open=False):
                     note_picker = gr.Dropdown(label="已有笔记", choices=[], value=None, interactive=True)

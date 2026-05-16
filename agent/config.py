@@ -11,6 +11,20 @@ from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from agent.reranker import DEFAULT_DASHSCOPE_RERANK_URL, DashScopeReranker
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent  # 项目根目录。
+
+load_dotenv(PROJECT_ROOT / ".env")
+
+# ── 扫描型 PDF 处理配置 ──
+SCANNED_PAGE_CHAR_THRESHOLD = int(os.getenv("SCANNED_PAGE_CHAR_THRESHOLD", "50"))
+PDF_TO_IMAGE_DPI = int(os.getenv("OCR_DPI", "200"))
+OCR_LANG = os.getenv("OCR_LANG", "ch")
+OCR_USE_GPU = os.getenv("OCR_USE_GPU", "false").lower() == "true"
+OCR_FALLBACK_LANG = os.getenv("OCR_FALLBACK_LANG", "chi_sim+eng")
+GLM4V_MAX_TOKENS = int(os.getenv("VISION_MAX_TOKENS", "1024"))
+GLM4V_TIMEOUT_SECONDS = int(os.getenv("VISION_TIMEOUT", "30"))
+PDF_PAGE_CACHE_ENABLED = os.getenv("PDF_PAGE_CACHE_ENABLED", "true").lower() not in {"0", "false", "no"}
+PDF_PAGE_CACHE_DIR = Path(os.getenv("PDF_PAGE_CACHE_DIR", str(PROJECT_ROOT / ".cache" / "pdf_pages")))
+
 LLM_TIMEOUT_SECONDS = 60  # 主模型请求超时时间。
 FAST_LLM_TIMEOUT_SECONDS = 30  # 轻量模型请求超时时间。
 RERANK_TIMEOUT_SECONDS = 20  # rerank HTTP 请求超时时间。
@@ -18,8 +32,7 @@ _LLM = None  # 主模型实例单例缓存。
 _FAST_LLM = None  # fast_llm 实例单例缓存。
 _RERANKER = None  # reranker 实例单例缓存。
 _EMBEDDINGS = None  # embedding 实例单例缓存。
-
-load_dotenv(PROJECT_ROOT / ".env")
+_VISION_LLM = None  # 视觉模型实例单例缓存。
 
 
 def get_llm():
@@ -112,3 +125,19 @@ def get_embeddings():
         check_embedding_ctx_length=False,
     )
     return _EMBEDDINGS
+
+
+def get_vision_llm():
+    """创建 GLM-4V-Flash 多模态模型实例，用于图表描述。复用智谱 API Key。"""
+    global _VISION_LLM
+    if _VISION_LLM is not None:
+        return _VISION_LLM
+    _VISION_LLM = ChatOpenAI(
+        model=os.getenv("VISION_MODEL", "glm-4v-flash"),
+        api_key=os.getenv("ZHIPU_API_KEY"),
+        base_url=os.getenv("ZHIPU_URL"),
+        max_tokens=GLM4V_MAX_TOKENS,
+        timeout=GLM4V_TIMEOUT_SECONDS,
+        max_retries=0,
+    )
+    return _VISION_LLM

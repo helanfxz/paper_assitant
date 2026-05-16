@@ -27,6 +27,15 @@ from agent.error_recovery import ModelRecoveryManager
 PDF_COLLECTION_NAME = "pdf_knowledge"  # 论文分块向量库集合名。
 SESSION_MEMORY_COLLECTION_NAME = "user_semantic_memory"  # 当前 session 的窗口压缩摘要集合名。
 STUDY_NOTES_COLLECTION_NAME = "study_notes"  # 跨 session 的用户研究笔记集合名。
+PDF_PAYLOAD_INDEX_FIELDS = (
+    "user_id",
+    "source",
+    "parent_id",
+    "chunk_id",
+    "page_type",
+    "content_source",
+    "evidence_type",
+)
 
 # Session memory 召回与压缩参数。
 # 这些参数决定了：
@@ -198,7 +207,7 @@ def init_vector_stores(embeddings):
     # 这里统一补齐当前项目检索和过滤实际会用到的 keyword 字段，
     # 避免后续 similarity_search(filter=...) 因缺少索引直接报 400。
     index_fields_by_collection = {
-        PDF_COLLECTION_NAME: ("user_id", "source", "parent_id", "chunk_id"),
+        PDF_COLLECTION_NAME: PDF_PAYLOAD_INDEX_FIELDS,
         SESSION_MEMORY_COLLECTION_NAME: ("user_id", "session_id", "type"),
         STUDY_NOTES_COLLECTION_NAME: ("user_id", "note_id", "source_session_id"),
     }
@@ -233,12 +242,7 @@ def init_vector_stores(embeddings):
     return _VECTOR_STORES_CACHE
 
 
-def _extract_payload_metadata(payload: dict | None) -> dict:
-    """兼容 Qdrant payload 的不同形态，统一取出 metadata。"""
-    if not isinstance(payload, dict):
-        return {}
-    nested_metadata = payload.get("metadata")
-    return nested_metadata if isinstance(nested_metadata, dict) else payload
+from agent.utils import extract_payload_metadata as _extract_payload_metadata
 
 
 def _iter_user_note_records(study_notes_store, user_id: str) -> list[dict[str, str]]:

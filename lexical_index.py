@@ -5,12 +5,15 @@
 # - lexical index 负责术语、缩写、模块名、数据集名等精确匹配
 
 import hashlib
+import json
 import math
 import re
 import sqlite3
 from collections import Counter
 from pathlib import Path
 
+from agent.memory import PDF_COLLECTION_NAME
+from agent.utils import extract_payload_metadata
 from langchain_core.documents import Document
 
 INDEX_DB_PATH = Path(__file__).parent / "lexical_index.db"  # 持久化 BM25 倒排索引文件。
@@ -65,6 +68,7 @@ class PersistentLexicalIndex:
                     parent_id TEXT NOT NULL,
                     parent_text TEXT NOT NULL,
                     content TEXT NOT NULL,
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
                     doc_len INTEGER NOT NULL
                 );
 
@@ -81,6 +85,12 @@ class PersistentLexicalIndex:
                 CREATE INDEX IF NOT EXISTS idx_postings_chunk_id ON postings(chunk_id);
                 """
             )
+            chunk_columns = {
+                row["name"]
+                for row in conn.execute("PRAGMA table_info(chunks)").fetchall()
+            }
+            if "metadata_json" not in chunk_columns:
+                conn.execute("ALTER TABLE chunks ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}'")
 
     def remove_source(self, user_id: str, source: str) -> None:
         """删除某个 source 下的全部共享 PDF lexical index 数据。"""
@@ -104,7 +114,7 @@ class PersistentLexicalIndex:
         if replace_source:
             self.remove_source(user_id, source)
 
-        chunk_rows: list[tuple[str, str, str, str, str, str, int]] = []
+        chunk_rows: list[tuple[str, str, str, str, str, str, str, int]] = []
         posting_rows: list[tuple[str, str, int]] = []
 
         # 这里在入库阶段就把 token postings 写好，避免检索时再全量扫正文计算 BM25。
@@ -124,6 +134,7 @@ class PersistentLexicalIndex:
                     parent_id,
                     parent_text,
                     content,
+                    json.dumps(doc.metadata, ensure_ascii=False),
                     len(tokens),
                 )
             )
@@ -133,8 +144,8 @@ class PersistentLexicalIndex:
             conn.executemany(
                 """
                 INSERT OR REPLACE INTO chunks (
-                    chunk_id, user_id, source, parent_id, parent_text, content, doc_len
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    chunk_id, user_id, source, parent_id, parent_text, content, metadata_json, doc_len
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 chunk_rows,
             )
@@ -154,15 +165,14 @@ class PersistentLexicalIndex:
 
         while True:
             points, offset = pdf_store.client.scroll(
-                collection_name="pdf_knowledge",
+                collection_name=PDF_COLLECTION_NAME,
                 limit=256,
                 offset=offset,
                 with_payload=True,
                 with_vectors=False,
             )
             for point in points:
-                payload = point.payload or {}
-                metadata = payload.get("metadata", {}) if isinstance(payload.get("metadata"), dict) else payload
+                metadata = extract_payload_metadata(point.payload or {})
                 point_source = str(metadata.get("source", ""))
                 if source and point_source != source:
                     continue
@@ -232,7 +242,8 @@ class PersistentLexicalIndex:
                     c.content,
                     c.parent_id,
                     c.parent_text,
-                    c.source
+                    c.source,
+                    c.metadata_json
                 FROM postings p
                 JOIN chunks c ON c.chunk_id = p.chunk_id
                 WHERE {sql_filter} AND p.token IN ({placeholders})
@@ -264,16 +275,25 @@ class PersistentLexicalIndex:
         ranked_docs: list[Document] = []
         for chunk_id in ranked_chunk_ids:
             row = chunk_rows_by_id[chunk_id]
+            try:
+                stored_metadata = json.loads(str(row["metadata_json"] or "{}"))
+                if not isinstance(stored_metadata, dict):
+                    stored_metadata = {}
+            except json.JSONDecodeError:
+                stored_metadata = {}
+            stored_metadata.update(
+                {
+                    "chunk_id": chunk_id,
+                    "parent_id": str(row["parent_id"]),
+                    "parent_text": str(row["parent_text"]),
+                    "source": str(row["source"]),
+                    "user_id": PDF_SHARED_SCOPE,
+                }
+            )
             ranked_docs.append(
                 Document(
                     page_content=str(row["content"]),
-                    metadata={
-                        "chunk_id": chunk_id,
-                        "parent_id": str(row["parent_id"]),
-                        "parent_text": str(row["parent_text"]),
-                        "source": str(row["source"]),
-                        "user_id": PDF_SHARED_SCOPE,
-                    },
+                    metadata=stored_metadata,
                 )
             )
 

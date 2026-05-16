@@ -92,16 +92,18 @@
 
 ## 文档检索流程
 
-文档检索仍保留论文阅读助手的核心能力：
+PDF 入库现在统一走页级证据链：
 
-1. PDF 转 Markdown
-2. 父块 / 子块切分
-3. 子块同时写入 Qdrant 和持久化词法索引
-4. 检索时做 MQE 扩展查询
-5. 向量检索与 BM25 检索并行召回
-6. 用 RRF 融合多路 child chunk 结果
-7. 聚合父块
-8. 使用独立 `rerank_llm` 做最终重排
+1. 逐页分类，区分原生文本页和扫描页
+2. 文本页用 PyMuPDF 逐页提取文本，扫描页才渲染图片并调用 OCR
+3. 可选开启表格/图表增强，把表格提取和自动图表描述写成独立证据块
+4. 每页生成 `PageContent`，保留 `page_number / page_type / content_source / generated`
+5. 按页做父块 / 子块切分，避免 chunk 跨页导致页码不准
+6. 子块同时写入 Qdrant 和持久化 BM25 索引，BM25 也保留完整证据 metadata
+7. 检索时做 MQE 扩展查询，向量检索与 BM25 并行召回
+8. 用 RRF 融合多路 child chunk 结果，聚合父块后用独立 `rerank_llm` 做最终重排
+
+重复上传同一个 PDF 时，系统按 `file_hash + ingestion_profile` 复用已有入库结果。同名文件内容变化或处理 profile 变化时，会先清理旧 Qdrant points 和旧 BM25 记录再重新入库，避免检索混入旧内容。
 
 ## 依赖
 
@@ -110,9 +112,12 @@
 - `langchain_openai`
 - `langchain_qdrant`
 - `qdrant_client`
-- `pymupdf4llm`
+- `PyMuPDF`
+- `Pillow`
 - `gradio`
 - `pydantic`
+
+扫描型 PDF 的 OCR 增强依赖是可选能力：优先使用 `paddleocr`，不可用时降级到 Tesseract；如果本机 OCR 依赖都不可用，扫描页会返回明确的 OCR 失败文本，不会导致整个项目启动失败。表格/图表增强需要在上传区显式勾选，才会尝试使用 PP-Structure 和 GLM-4V。
 
 ## 启动方式
 
